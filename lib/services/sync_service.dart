@@ -9,6 +9,25 @@ class SyncService {
 
   /// Sincroniza los empleados y vectores desde SQL Server central hacia SQLite local
   Future<void> sincronizarDesdeSqlServer() async {
+    print('[Sync] Iniciando descarga de horarios desde SQL Server...');
+    try {
+      final remoteSchedules = await _sqlServer.obtenerHorariosServidor();
+      print('[Sync] Descargados ${remoteSchedules.length} horarios.');
+      for (final s in remoteSchedules) {
+        if (s['id_horario'] != null) {
+          await _database.saveSchedule({
+            'id_horario': s['id_horario'].toString().trim(),
+            'hora_inicio': s['hora_inicio']?.toString().trim() ?? '',
+            'hora_final': s['hora_final']?.toString().trim() ?? '',
+            'tipo': s['tipo']?.toString().trim() ?? 'LABORAL',
+            'dias': s['dias']?.toString().trim() ?? '',
+          });
+        }
+      }
+    } catch (e) {
+      print('[Sync] Advertencia al sincronizar horarios: $e');
+    }
+
     print('[Sync] Iniciando descarga de empleados desde SQL Server...');
     final remoteData = await _sqlServer.obtenerYActualizarEmpleados();
     print('[Sync] Descargados ${remoteData.length} empleados.');
@@ -18,6 +37,7 @@ class SyncService {
       final String? nombre = row['nombre']?.toString().trim();
       final String? estado = row['estado']?.toString().trim();
       final String? departamento = row['id_seccion']?.toString().trim() ?? row['tipo']?.toString().trim();
+      final String? horarioId = row['horario_id']?.toString().trim();
       final String part1 = row['vec_part1']?.toString() ?? '';
       final String part2 = row['vec_part2']?.toString() ?? '';
       final String part3 = row['vec_part3']?.toString() ?? '';
@@ -45,6 +65,7 @@ class SyncService {
         name: nombre,
         employeeCode: cedula,
         department: departamento,
+        horarioId: horarioId != null && horarioId.isNotEmpty ? horarioId : null,
         createdAt: DateTime.now(),
       );
 

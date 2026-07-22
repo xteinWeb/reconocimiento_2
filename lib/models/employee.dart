@@ -3,6 +3,7 @@ class Employee {
   final String name;
   final String employeeCode;
   final String? department;
+  final String? horarioId;
   final DateTime createdAt;
 
   Employee({
@@ -10,6 +11,7 @@ class Employee {
     required this.name,
     required this.employeeCode,
     this.department,
+    this.horarioId,
     required this.createdAt,
   });
 
@@ -19,6 +21,7 @@ class Employee {
       'name': name,
       'employee_code': employeeCode,
       'department': department,
+      'horario_id': horarioId,
       'created_at': createdAt.toIso8601String(),
     };
   }
@@ -29,6 +32,7 @@ class Employee {
       name: map['name'] as String,
       employeeCode: map['employee_code'] as String,
       department: map['department'] as String?,
+      horarioId: map['horario_id'] as String?,
       createdAt: DateTime.parse(map['created_at'] as String),
     );
   }

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'attendance_screen.dart';
 import 'attendance_list_screen.dart';
 import 'employee_list_screen.dart';
+import 'absence_screen.dart';
 import '../services/sync_service.dart';
 import '../theme/app_colors.dart';
 
@@ -53,19 +54,16 @@ class _HomeScreenState extends State<HomeScreen> {
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
             colors: isDark
-                ? [
-                    AppColors.kioskBackground,
-                    const Color(0xFF131D10),
-                  ]
-                : [
-                    AppColors.background,
-                    const Color(0xFFECE7E1),
-                  ],
+                ? [AppColors.kioskBackground, const Color(0xFF131D10)]
+                : [AppColors.background, const Color(0xFFECE7E1)],
           ),
         ),
         child: SafeArea(
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 32.0),
+            padding: const EdgeInsets.symmetric(
+              horizontal: 24.0,
+              vertical: 32.0,
+            ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -82,7 +80,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 const SizedBox(height: 24),
                 Text(
-                  'BioAttendance',
+                  'Registro de asistencia',
                   style: TextStyle(
                     fontSize: 36,
                     fontWeight: FontWeight.w900,
@@ -110,7 +108,9 @@ class _HomeScreenState extends State<HomeScreen> {
                   color: AppColors.accent,
                   onPressed: () => Navigator.push(
                     context,
-                    MaterialPageRoute(builder: (_) => const EmployeeListScreen()),
+                    MaterialPageRoute(
+                      builder: (_) => const EmployeeListScreen(),
+                    ),
                   ),
                 ),
                 const SizedBox(height: 16),
@@ -130,7 +130,9 @@ class _HomeScreenState extends State<HomeScreen> {
                   context,
                   icon: Icons.sync_rounded,
                   title: 'Sincronizar Servidor',
-                  subtitle: _isSyncing ? 'Sincronizando...' : 'Actualizar empleados y horarios',
+                  subtitle: _isSyncing
+                      ? 'Sincronizando...'
+                      : 'Actualizar empleados y horarios',
                   color: AppColors.accent,
                   trailing: _isSyncing
                       ? const SizedBox(
@@ -153,19 +155,24 @@ class _HomeScreenState extends State<HomeScreen> {
                   color: AppColors.primaryDark,
                   onPressed: () => Navigator.push(
                     context,
-                    MaterialPageRoute(builder: (_) => const AttendanceListScreen()),
+                    MaterialPageRoute(
+                      builder: (_) => AttendanceListScreen(),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                _buildOptionCard(
+                  context,
+                  icon: Icons.calendar_today_rounded,
+                  title: 'Gestión de Ausencias',
+                  subtitle: 'Visualizar y justificar faltas diarias',
+                  color: AppColors.secondary,
+                  onPressed: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const AbsenceScreen()),
                   ),
                 ),
                 const Spacer(),
-                Text(
-                  'v2.0 • Edge Computing SQL Server Offline',
-                  style: TextStyle(
-                    color: isDark ? Colors.white38 : AppColors.textSecondary.withOpacity(0.5),
-                    fontSize: 12,
-                    fontWeight: FontWeight.w400,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
               ],
             ),
           ),
@@ -223,7 +230,9 @@ class _HomeScreenState extends State<HomeScreen> {
                       subtitle,
                       style: TextStyle(
                         fontSize: 13,
-                        color: isDark ? Colors.white60 : AppColors.textSecondary,
+                        color: isDark
+                            ? Colors.white60
+                            : AppColors.textSecondary,
                       ),
                     ),
                   ],

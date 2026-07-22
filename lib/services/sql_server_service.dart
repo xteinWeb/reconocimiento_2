@@ -3,7 +3,7 @@ import 'package:sql_conn/sql_conn.dart';
 
 class SqlServerService {
   final String connectionId = 'mainDB';
-  final String ip = '190.85.54.78';
+  final String ip = '192.168.10.101';
   final int port = 1433;
   final String dbname = 'ARTDECON';
   final String username = 'sa';
@@ -205,6 +205,89 @@ class SqlServerService {
     } catch (e) {
       print('[SqlServer] ERROR al actualizar vector: $e');
       return false;
+    } finally {
+      await disconnect();
+    }
+  }
+
+  /// Registra una marcación de asistencia en el servidor SQL Server central
+  Future<bool> guardarAsistenciaServidor({
+    required String cedula,
+    required DateTime fechaHora,
+    String evento = 'ENTRADA',
+    double duracion = 0.0,
+    String tipo = 'NORMAL',
+    String unidadNegocio = '',
+    String metodoRegistro = 'FACIAL',
+  }) async {
+    final connected = await connect();
+    if (!connected) return false;
+
+    try {
+      final fechaHoraStr = fechaHora.toIso8601String().replaceFirst('T', ' ').substring(0, 19);
+      final query = """
+        INSERT INTO registros_asistencia (
+          fecha_hora, 
+          cedula, 
+          evento, 
+          duracion, 
+          tipo, 
+          unidad_negocio, 
+          fecha_registro_servidor, 
+          metodo_registro
+        )
+        VALUES (
+          '$fechaHoraStr', 
+          '$cedula', 
+          '$evento', 
+          $duracion, 
+          '$tipo', 
+          '$unidadNegocio', 
+          GETDATE(), 
+          '$metodoRegistro'
+        );
+      """;
+
+      await SqlConn.write(connectionId, query);
+      return true;
+    } catch (e) {
+      print('[SqlServer] ERROR al guardar asistencia en servidor: $e');
+      return false;
+    } finally {
+      await disconnect();
+    }
+  }
+
+  /// Obtiene los detalles de los horarios (turnos) desde SQL Server central
+  Future<List<Map<String, dynamic>>> obtenerHorariosServidor() async {
+    final connected = await connect();
+    if (!connected) {
+      throw Exception('No se pudo conectar al servidor SQL Server.');
+    }
+
+    try {
+      print('[SqlServer] Obteniendo detalles de itm_horarios...');
+      final results = await SqlConn.read(connectionId, """
+        SELECT 
+            LTRIM(RTRIM(ID_HORARIO)) AS id_horario,
+            CONVERT(VARCHAR(5), MIN(INICIO), 108) AS hora_inicio,
+            CONVERT(VARCHAR(5), MAX(FINAL), 108) AS hora_final,
+            'PRODUCTIVA' AS tipo,
+            STUFF(
+              (CASE WHEN MAX(CAST(LUNES AS INT)) = 1 THEN ',L' ELSE '' END) +
+              (CASE WHEN MAX(CAST(MARTES AS INT)) = 1 THEN ',M' ELSE '' END) +
+              (CASE WHEN MAX(CAST(MIERCOLES AS INT)) = 1 THEN ',Mi' ELSE '' END) +
+              (CASE WHEN MAX(CAST(JUEVES AS INT)) = 1 THEN ',J' ELSE '' END) +
+              (CASE WHEN MAX(CAST(VIERNES AS INT)) = 1 THEN ',V' ELSE '' END) +
+              (CASE WHEN MAX(CAST(SABADO AS INT)) = 1 THEN ',S' ELSE '' END) +
+              (CASE WHEN MAX(CAST(DOMINGO AS INT)) = 1 THEN ',D' ELSE '' END),
+              1, 1, ''
+            ) AS dias
+        FROM itm_horarios
+        WHERE ID_HORARIO IS NOT NULL AND INICIO IS NOT NULL AND FINAL IS NOT NULL AND TIPO = 'PRODUCTIVA'
+        GROUP BY ID_HORARIO
+      """);
+      return results;
     } finally {
       await disconnect();
     }

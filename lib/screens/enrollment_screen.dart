@@ -43,11 +43,51 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
   bool _showForm = true;
 
   final List<Map<String, dynamic>> _poses = [
-    {'name': 'Frontal', 'yawMin': -8.0, 'yawMax': 8.0, 'pitchMin': -8.0, 'pitchMax': 8.0, 'emoji': '🙂', 'description': 'Mira de frente'},
-    {'name': 'Izquierda', 'yawMin': -45.0, 'yawMax': -10.0, 'pitchMin': -12.0, 'pitchMax': 12.0, 'emoji': '👈', 'description': 'Gira la cabeza a la izquierda'},
-    {'name': 'Derecha', 'yawMin': 10.0, 'yawMax': 45.0, 'pitchMin': -12.0, 'pitchMax': 12.0, 'emoji': '👉', 'description': 'Gira la cabeza a la derecha'},
-    {'name': 'Arriba', 'yawMin': -12.0, 'yawMax': 12.0, 'pitchMin': -35.0, 'pitchMax': -8.0, 'emoji': '👆', 'description': 'Mira hacia arriba ligeramente'},
-    {'name': 'Sonrisa', 'yawMin': -8.0, 'yawMax': 8.0, 'pitchMin': -8.0, 'pitchMax': 8.0, 'emoji': '😊', 'description': 'Sonríe de frente'},
+    {
+      'name': 'Frontal',
+      'yawMin': -8.0,
+      'yawMax': 8.0,
+      'pitchMin': -8.0,
+      'pitchMax': 8.0,
+      'emoji': '🙂',
+      'description': 'Mira de frente',
+    },
+    {
+      'name': 'Izquierda',
+      'yawMin': -45.0,
+      'yawMax': -10.0,
+      'pitchMin': -12.0,
+      'pitchMax': 12.0,
+      'emoji': '👉',
+      'description': 'Gira la cabeza a la izquierda',
+    },
+    {
+      'name': 'Derecha',
+      'yawMin': 10.0,
+      'yawMax': 45.0,
+      'pitchMin': -12.0,
+      'pitchMax': 12.0,
+      'emoji': '👈',
+      'description': 'Gira la cabeza a la derecha',
+    },
+    {
+      'name': 'Arriba',
+      'yawMin': -12.0,
+      'yawMax': 12.0,
+      'pitchMin': -35.0,
+      'pitchMax': -8.0,
+      'emoji': '👆',
+      'description': 'Mira hacia arriba ligeramente',
+    },
+    {
+      'name': 'Sonrisa',
+      'yawMin': -8.0,
+      'yawMax': 8.0,
+      'pitchMin': -8.0,
+      'pitchMax': 8.0,
+      'emoji': '😊',
+      'description': 'Sonríe de frente',
+    },
   ];
 
   @override
@@ -69,7 +109,11 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
   Future<void> _startEnrollment() async {
     try {
       final db = await _database.database;
-      await db.delete('face_embeddings', where: 'employee_id = ?', whereArgs: [_employeeId]);
+      await db.delete(
+        'face_embeddings',
+        where: 'employee_id = ?',
+        whereArgs: [_employeeId],
+      );
     } catch (e) {
       print('[Enrollment] Error al limpiar embeddings locales anteriores: $e');
     }
@@ -107,7 +151,9 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
           _lightColor = lightResult.feedbackColor;
         });
 
-        if (lightResult.isOverexposed || lightResult.isBacklit || lightResult.isTooDark) {
+        if (lightResult.isOverexposed ||
+            lightResult.isBacklit ||
+            lightResult.isTooDark) {
           setState(() {
             _status = lightResult.feedback;
             _isProcessing = false;
@@ -135,15 +181,23 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
         });
 
         if (isPoseMatch) {
-          final cropped = await _faceDetection.cropFace(file.path, result.boundingBox);
+          final cropped = await _faceDetection.cropFace(
+            file.path,
+            result.boundingBox,
+          );
           if (cropped != null) {
             final embedding = _faceRecognition.getEmbedding(cropped);
-            await _database.saveEmbedding(_employeeId!, embedding, pose['name'] as String);
+            await _database.saveEmbedding(
+              _employeeId!,
+              embedding,
+              pose['name'] as String,
+            );
 
             setState(() {
               _currentPoseIndex++;
               if (_currentPoseIndex < _poses.length) {
-                _status = "Paso completado. Siguiente: ${_poses[_currentPoseIndex]['description']}";
+                _status =
+                    "Paso completado. Siguiente: ${_poses[_currentPoseIndex]['description']}";
               } else {
                 _status = "🎉 ¡Enrolamiento completado localmente!";
                 _isCapturing = false;
@@ -153,7 +207,8 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
           }
         } else {
           setState(() {
-            _status = "${pose['description']}\n(Ángulos actual: Yaw: ${result.yaw.toStringAsFixed(0)}°, Pitch: ${result.pitch.toStringAsFixed(0)}°)";
+            _status =
+                "${pose['description']}\n(Ángulos actual: Yaw: ${result.yaw.toStringAsFixed(0)}°, Pitch: ${result.pitch.toStringAsFixed(0)}°)";
           });
         }
       } catch (e) {
@@ -172,9 +227,15 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
     });
     try {
       final embeddings = await _database.getEmbeddingsByEmployee(_employeeId!);
-      
+
       // Orden esperado por el servidor central de SQL Server
-      final expectedPoses = ['Frontal', 'Izquierda', 'Derecha', 'Arriba', 'Sonrisa'];
+      final expectedPoses = [
+        'Frontal',
+        'Izquierda',
+        'Derecha',
+        'Arriba',
+        'Sonrisa',
+      ];
       final sortedPoses = <List<double>>[];
 
       for (final poseName in expectedPoses) {
@@ -194,12 +255,15 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
         cedula: _codeController.text.trim(),
         nombre: _nameController.text.trim(),
         poses: sortedPoses,
-        departamento: _deptController.text.isEmpty ? null : _deptController.text.trim(),
+        departamento: _deptController.text.isEmpty
+            ? null
+            : _deptController.text.trim(),
       );
 
       setState(() {
         if (success) {
-          _status = "🎉 ¡Enrolamiento completado y sincronizado con SQL Server!";
+          _status =
+              "🎉 ¡Enrolamiento completado y sincronizado con SQL Server!";
         } else {
           _status = "⚠️ Guardado localmente. Error de conexión con SQL Server.";
         }
@@ -215,7 +279,9 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     return Scaffold(
-      backgroundColor: isDark ? AppColors.kioskBackground : AppColors.background,
+      backgroundColor: isDark
+          ? AppColors.kioskBackground
+          : AppColors.background,
       appBar: AppBar(
         title: const Text('Enrolamiento Guiado'),
         foregroundColor: isDark ? Colors.white : AppColors.textPrimary,
@@ -261,18 +327,29 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
           TextField(
             controller: _nameController,
             readOnly: true,
-            style: TextStyle(color: isDark ? Colors.white : AppColors.textPrimary),
+            style: TextStyle(
+              color: isDark ? Colors.white : AppColors.textPrimary,
+            ),
             decoration: InputDecoration(
               labelText: 'Nombre Completo',
-              labelStyle: TextStyle(color: isDark ? Colors.white60 : AppColors.textSecondary),
-              prefixIcon: Icon(Icons.person, color: isDark ? Colors.white60 : AppColors.textSecondary),
+              labelStyle: TextStyle(
+                color: isDark ? Colors.white60 : AppColors.textSecondary,
+              ),
+              prefixIcon: Icon(
+                Icons.person,
+                color: isDark ? Colors.white60 : AppColors.textSecondary,
+              ),
               enabledBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: isDark ? Colors.white24 : AppColors.border),
+                borderSide: BorderSide(
+                  color: isDark ? Colors.white24 : AppColors.border,
+                ),
               ),
               focusedBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: isDark ? AppColors.kioskAccent : AppColors.primary),
+                borderSide: BorderSide(
+                  color: isDark ? AppColors.kioskAccent : AppColors.primary,
+                ),
               ),
             ),
           ),
@@ -280,18 +357,29 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
           TextField(
             controller: _codeController,
             readOnly: true,
-            style: TextStyle(color: isDark ? Colors.white : AppColors.textPrimary),
+            style: TextStyle(
+              color: isDark ? Colors.white : AppColors.textPrimary,
+            ),
             decoration: InputDecoration(
               labelText: 'Código de Empleado (Cédula)',
-              labelStyle: TextStyle(color: isDark ? Colors.white60 : AppColors.textSecondary),
-              prefixIcon: Icon(Icons.badge, color: isDark ? Colors.white60 : AppColors.textSecondary),
+              labelStyle: TextStyle(
+                color: isDark ? Colors.white60 : AppColors.textSecondary,
+              ),
+              prefixIcon: Icon(
+                Icons.badge,
+                color: isDark ? Colors.white60 : AppColors.textSecondary,
+              ),
               enabledBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: isDark ? Colors.white24 : AppColors.border),
+                borderSide: BorderSide(
+                  color: isDark ? Colors.white24 : AppColors.border,
+                ),
               ),
               focusedBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: isDark ? AppColors.kioskAccent : AppColors.primary),
+                borderSide: BorderSide(
+                  color: isDark ? AppColors.kioskAccent : AppColors.primary,
+                ),
               ),
             ),
           ),
@@ -299,18 +387,29 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
           TextField(
             controller: _deptController,
             readOnly: true,
-            style: TextStyle(color: isDark ? Colors.white : AppColors.textPrimary),
+            style: TextStyle(
+              color: isDark ? Colors.white : AppColors.textPrimary,
+            ),
             decoration: InputDecoration(
               labelText: 'Sección',
-              labelStyle: TextStyle(color: isDark ? Colors.white60 : AppColors.textSecondary),
-              prefixIcon: Icon(Icons.business, color: isDark ? Colors.white60 : AppColors.textSecondary),
+              labelStyle: TextStyle(
+                color: isDark ? Colors.white60 : AppColors.textSecondary,
+              ),
+              prefixIcon: Icon(
+                Icons.business,
+                color: isDark ? Colors.white60 : AppColors.textSecondary,
+              ),
               enabledBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: isDark ? Colors.white24 : AppColors.border),
+                borderSide: BorderSide(
+                  color: isDark ? Colors.white24 : AppColors.border,
+                ),
               ),
               focusedBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: isDark ? AppColors.kioskAccent : AppColors.primary),
+                borderSide: BorderSide(
+                  color: isDark ? AppColors.kioskAccent : AppColors.primary,
+                ),
               ),
             ),
           ),
@@ -318,9 +417,13 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
           ElevatedButton(
             onPressed: _startEnrollment,
             style: ElevatedButton.styleFrom(
-              backgroundColor: isDark ? AppColors.kioskAccent : AppColors.primary,
+              backgroundColor: isDark
+                  ? AppColors.kioskAccent
+                  : AppColors.primary,
               foregroundColor: isDark ? Colors.black87 : Colors.white,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
               padding: const EdgeInsets.symmetric(vertical: 16),
             ),
             child: const Text(
@@ -342,23 +445,24 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
             children: [
               _cameraService.isInitialized
                   ? CameraPreview(_cameraService.controller!)
-                  : const Center(child: CircularProgressIndicator(color: Colors.tealAccent)),
+                  : const Center(
+                      child: CircularProgressIndicator(
+                        color: Colors.tealAccent,
+                      ),
+                    ),
               Center(
                 child: Container(
                   width: 260,
                   height: 260,
                   decoration: BoxDecoration(
-                    border: Border.all(
-                      color: _lightColor,
-                      width: 3,
-                    ),
+                    border: Border.all(color: _lightColor, width: 3),
                     shape: BoxShape.circle,
                     boxShadow: [
                       BoxShadow(
                         color: _lightColor.withOpacity(0.2),
                         blurRadius: 15,
                         spreadRadius: 3,
-                      )
+                      ),
                     ],
                   ),
                 ),
@@ -380,7 +484,10 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
             children: [
               if (_lightStatus.isNotEmpty)
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 8,
+                  ),
                   decoration: BoxDecoration(
                     color: _lightColor.withOpacity(0.12),
                     borderRadius: BorderRadius.circular(20),
@@ -388,7 +495,11 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
                   ),
                   child: Text(
                     _lightStatus,
-                    style: TextStyle(color: _lightColor, fontSize: 13, fontWeight: FontWeight.w600),
+                    style: TextStyle(
+                      color: _lightColor,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                 ),
               const SizedBox(height: 16),
@@ -418,7 +529,9 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
                         isDone ? '✓' : pose['emoji'] as String,
                         style: TextStyle(
                           fontSize: isCurrent ? 20 : 16,
-                          color: isDone || isCurrent ? Colors.black87 : Colors.white38,
+                          color: isDone || isCurrent
+                              ? Colors.black87
+                              : Colors.white38,
                           fontWeight: FontWeight.bold,
                         ),
                       ),
@@ -444,10 +557,15 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
                     style: ElevatedButton.styleFrom(
                       backgroundColor: Colors.tealAccent,
                       foregroundColor: Colors.black87,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
                       minimumSize: const Size(double.infinity, 50),
                     ),
-                    child: const Text('Finalizar y Regresar', style: TextStyle(fontWeight: FontWeight.bold)),
+                    child: const Text(
+                      'Finalizar y Regresar',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
                   ),
                 ),
             ],

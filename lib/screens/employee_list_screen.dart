@@ -83,7 +83,7 @@ class _EmployeeListScreenState extends State<EmployeeListScreen> {
 
       // 2. Filtro por estado de enrolamiento
       final count = _embeddingsCount[emp.id] ?? 0;
-      final isEnrolled = count > 0;
+      final isEnrolled = count == 5;
       bool matchesStatus = true;
       if (_selectedStatus == "Enrolados") {
         matchesStatus = isEnrolled;
@@ -105,6 +105,9 @@ class _EmployeeListScreenState extends State<EmployeeListScreen> {
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final filtered = _getFilteredEmployees();
+    final double screenWidth = MediaQuery.of(context).size.width;
+    final int crossAxisCount = screenWidth > 900 ? 4 : (screenWidth > 600 ? 3 : 2);
+    final double childAspectRatio = screenWidth > 900 ? 1.05 : (screenWidth > 600 ? 0.9 : 0.8);
 
     return Scaffold(
       backgroundColor: isDark ? AppColors.kioskBackground : AppColors.background,
@@ -213,9 +216,9 @@ class _EmployeeListScreenState extends State<EmployeeListScreen> {
                       )
                     : GridView.builder(
                         padding: const EdgeInsets.all(16),
-                        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: 3, // 3 columnas para pantalla de Tótem
-                          childAspectRatio: 1.1,
+                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: crossAxisCount,
+                          childAspectRatio: childAspectRatio,
                           crossAxisSpacing: 16,
                           mainAxisSpacing: 16,
                         ),
@@ -223,7 +226,8 @@ class _EmployeeListScreenState extends State<EmployeeListScreen> {
                         itemBuilder: (ctx, index) {
                           final emp = filtered[index];
                           final count = _embeddingsCount[emp.id] ?? 0;
-                          final hasEmbeddings = count > 0;
+                          final isEnrolled = count == 5;
+                          final isIncomplete = count > 0 && count < 5;
 
                           return Card(
                             elevation: 3,
@@ -232,13 +236,17 @@ class _EmployeeListScreenState extends State<EmployeeListScreen> {
                               borderRadius: BorderRadius.circular(16),
                               side: BorderSide(
                                 color: isDark
-                                    ? (hasEmbeddings
+                                    ? (isEnrolled
                                         ? AppColors.secondary.withOpacity(0.3)
-                                        : Colors.white10)
-                                    : (hasEmbeddings
+                                        : (isIncomplete
+                                            ? AppColors.warning.withOpacity(0.3)
+                                            : Colors.white10))
+                                    : (isEnrolled
                                         ? AppColors.secondary.withOpacity(0.3)
-                                        : AppColors.border),
-                                width: hasEmbeddings ? 2 : 1,
+                                        : (isIncomplete
+                                            ? AppColors.warning.withOpacity(0.3)
+                                            : AppColors.border)),
+                                width: isEnrolled || isIncomplete ? 2 : 1,
                               ),
                             ),
                             child: InkWell(
@@ -259,12 +267,22 @@ class _EmployeeListScreenState extends State<EmployeeListScreen> {
                                   children: [
                                     CircleAvatar(
                                       radius: 26,
-                                      backgroundColor: hasEmbeddings
+                                      backgroundColor: isEnrolled
                                           ? AppColors.secondary.withOpacity(0.15)
-                                          : AppColors.error.withOpacity(0.1),
+                                          : (isIncomplete
+                                              ? AppColors.warning.withOpacity(0.15)
+                                              : AppColors.error.withOpacity(0.1)),
                                       child: Icon(
-                                        hasEmbeddings ? Icons.face_rounded : Icons.face_retouching_off_rounded,
-                                        color: hasEmbeddings ? AppColors.secondary : AppColors.error,
+                                        isEnrolled
+                                            ? Icons.face_rounded
+                                            : (isIncomplete
+                                                ? Icons.face_retouching_natural
+                                                : Icons.face_retouching_off_rounded),
+                                        color: isEnrolled
+                                            ? AppColors.secondary
+                                            : (isIncomplete
+                                                ? AppColors.warning
+                                                : AppColors.error),
                                         size: 28,
                                       ),
                                     ),
@@ -300,21 +318,46 @@ class _EmployeeListScreenState extends State<EmployeeListScreen> {
                                         ),
                                       ),
                                     ],
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      emp.horarioId != null
+                                          ? 'Horario: ${emp.horarioId}'
+                                          : 'Sin horario',
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        color: emp.horarioId != null
+                                            ? (isDark ? Colors.white70 : AppColors.textSecondary)
+                                            : AppColors.error,
+                                        fontWeight: emp.horarioId != null
+                                            ? FontWeight.normal
+                                            : FontWeight.w600,
+                                      ),
+                                    ),
                                     const SizedBox(height: 6),
                                     Container(
                                       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                                       decoration: BoxDecoration(
-                                        color: hasEmbeddings
+                                        color: isEnrolled
                                             ? AppColors.secondary.withOpacity(0.1)
-                                            : AppColors.error.withOpacity(0.1),
+                                            : (isIncomplete
+                                                ? AppColors.warning.withOpacity(0.1)
+                                                : AppColors.error.withOpacity(0.1)),
                                         borderRadius: BorderRadius.circular(4),
                                       ),
                                       child: Text(
-                                        hasEmbeddings ? 'Enrolado ($count)' : 'Pendiente',
+                                        isEnrolled
+                                            ? 'Enrolado ($count/5)'
+                                            : (isIncomplete
+                                                ? 'Incompleto ($count/5)'
+                                                : 'Pendiente'),
                                         style: TextStyle(
                                           fontSize: 10,
                                           fontWeight: FontWeight.bold,
-                                          color: hasEmbeddings ? AppColors.secondary : AppColors.error,
+                                          color: isEnrolled
+                                              ? AppColors.secondary
+                                              : (isIncomplete
+                                                  ? AppColors.warning
+                                                  : AppColors.error),
                                         ),
                                       ),
                                     ),
