@@ -3,11 +3,11 @@ import 'package:sql_conn/sql_conn.dart';
 
 class SqlServerService {
   final String connectionId = 'mainDB';
-  final String ip = '192.168.10.101';
-  final int port = 1433;
-  final String dbname = 'ARTDECON';
+  final String ip = '190.85.54.78';
+  final int port = 9788;
+  final String dbname = 'ARTDECOM';
   final String username = 'sa';
-  final String password = 'ADMadm1234';
+  final String password = 'sql2025DEVadmin';
 
   bool _isConnected = false;
 
@@ -224,8 +224,12 @@ class SqlServerService {
     if (!connected) return false;
 
     try {
-      final fechaHoraStr = fechaHora.toIso8601String().replaceFirst('T', ' ').substring(0, 19);
-      final query = """
+      final fechaHoraStr = fechaHora
+          .toIso8601String()
+          .replaceFirst('T', ' ')
+          .substring(0, 19);
+      final query =
+          """
         INSERT INTO registros_asistencia (
           fecha_hora, 
           cedula, 

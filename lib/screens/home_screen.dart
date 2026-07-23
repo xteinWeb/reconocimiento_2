@@ -59,7 +59,7 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ),
         child: SafeArea(
-          child: Padding(
+          child: SingleChildScrollView(
             padding: const EdgeInsets.symmetric(
               horizontal: 24.0,
               vertical: 32.0,
@@ -67,7 +67,7 @@ class _HomeScreenState extends State<HomeScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const Spacer(),
+                const SizedBox(height: 24),
                 Center(
                   child: Hero(
                     tag: 'appLogo',
@@ -99,7 +99,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                   textAlign: TextAlign.center,
                 ),
-                const Spacer(),
+                const SizedBox(height: 32),
                 _buildOptionCard(
                   context,
                   icon: Icons.people_alt_rounded,
@@ -172,7 +172,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     MaterialPageRoute(builder: (_) => const AbsenceScreen()),
                   ),
                 ),
-                const Spacer(),
+                const SizedBox(height: 32),
               ],
             ),
           ),
