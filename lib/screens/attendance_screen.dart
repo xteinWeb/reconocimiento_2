@@ -277,13 +277,14 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           }
 
           // 5. Guardar localmente en SQLite
-          await _database.insertAttendance(
+          final recordId = await _database.insertAttendance(
             matchedId,
             now,
             distance,
             evento: selection,
             tipo: tipoFinal,
             duracion: duracionRetardo,
+            isSynced: 0,
           );
 
           // 6. Sincronización en segundo plano con el servidor SQL Server central (offline-friendly)
@@ -294,8 +295,9 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             tipo: tipoFinal,
             duracion: duracionRetardo != null ? double.tryParse(duracionRetardo.split(' ')[0]) ?? 0.0 : 0.0,
             unidadNegocio: employee.department ?? '',
-          ).then((success) {
+          ).then((success) async {
             if (success) {
+              await _database.markAttendanceAsSynced(recordId);
               print('[SqlServer] Marcación sincronizada para: ${employee.name}');
             } else {
               print('[SqlServer] Marcación guardada localmente (servidor offline)');

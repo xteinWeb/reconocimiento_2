@@ -228,9 +228,17 @@ class SqlServerService {
           .toIso8601String()
           .replaceFirst('T', ' ')
           .substring(0, 19);
+
+      final safeCedula = cedula.replaceAll("'", "''");
+      final safeEvento = evento.replaceAll("'", "''");
+      final safeTipo = tipo.replaceAll("'", "''");
+      final safeUnidadNegocio = unidadNegocio.replaceAll("'", "''");
+      final safeMetodoRegistro = metodoRegistro.replaceAll("'", "''");
+
       final query =
           """
         INSERT INTO registros_asistencia (
+          id,
           fecha_hora, 
           cedula, 
           evento, 
@@ -241,14 +249,15 @@ class SqlServerService {
           metodo_registro
         )
         VALUES (
+          CAST(NEWID() AS VARCHAR(36)),
           '$fechaHoraStr', 
-          '$cedula', 
-          '$evento', 
+          '$safeCedula', 
+          '$safeEvento', 
           $duracion, 
-          '$tipo', 
-          '$unidadNegocio', 
+          '$safeTipo', 
+          '$safeUnidadNegocio', 
           GETDATE(), 
-          '$metodoRegistro'
+          '$safeMetodoRegistro'
         );
       """;
 

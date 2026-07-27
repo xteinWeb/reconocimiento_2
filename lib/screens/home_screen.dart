@@ -3,6 +3,7 @@ import 'attendance_screen.dart';
 import 'attendance_list_screen.dart';
 import 'employee_list_screen.dart';
 import 'absence_screen.dart';
+import 'sync_status_screen.dart';
 import '../services/sync_service.dart';
 import '../theme/app_colors.dart';
 
@@ -149,6 +150,20 @@ class _HomeScreenState extends State<HomeScreen> {
                 const SizedBox(height: 16),
                 _buildOptionCard(
                   context,
+                  icon: Icons.cloud_sync_rounded,
+                  title: 'Estado de Sincronización',
+                  subtitle: 'Ver registros pendientes y subir al servidor',
+                  color: AppColors.warning,
+                  onPressed: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => const SyncStatusScreen(),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                _buildOptionCard(
+                  context,
                   icon: Icons.assessment_rounded,
                   title: 'Panel de Reportes',
                   subtitle: 'Estadísticas, filtrado y exportación',
@@ -156,7 +171,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   onPressed: () => Navigator.push(
                     context,
                     MaterialPageRoute(
-                      builder: (_) => AttendanceListScreen(),
+                      builder: (_) => const AttendanceListScreen(),
                     ),
                   ),
                 ),

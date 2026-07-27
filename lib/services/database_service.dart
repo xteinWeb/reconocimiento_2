@@ -15,7 +15,7 @@ class DatabaseService {
     final path = join(await getDatabasesPath(), 'attendance.db');
     return openDatabase(
       path,
-      version: 3,
+      version: 5,
       onCreate: _createDB,
       onUpgrade: _onUpgrade,
     );
@@ -29,7 +29,8 @@ class DatabaseService {
         employee_code TEXT UNIQUE,
         department TEXT,
         horario_id TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        is_synced INTEGER DEFAULT 1
       )
     ''');
 
@@ -53,6 +54,7 @@ class DatabaseService {
         evento TEXT,
         tipo TEXT,
         duracion TEXT,
+        is_synced INTEGER DEFAULT 0,
         FOREIGN KEY (employee_id) REFERENCES employees(id)
       )
     ''');
@@ -125,12 +127,36 @@ class DatabaseService {
         print('Error creating absences table: $e');
       }
     }
+    if (oldVersion < 4) {
+      try {
+        await db.execute('ALTER TABLE attendance_records ADD COLUMN is_synced INTEGER DEFAULT 0');
+      } catch (e) {
+        print('Column is_synced already exists or error: $e');
+      }
+    }
+    if (oldVersion < 5) {
+      try {
+        await db.execute('ALTER TABLE employees ADD COLUMN is_synced INTEGER DEFAULT 1');
+      } catch (e) {
+        print('Column is_synced already exists in employees or error: $e');
+      }
+    }
   }
 
   // EMPLEADOS
   Future<int> insertEmployee(Employee employee) async {
     final db = await database;
     return db.insert('employees', employee.toMap());
+  }
+
+  Future<int> updateEmployeeSyncStatus(int employeeId, int isSynced) async {
+    final db = await database;
+    return db.update(
+      'employees',
+      {'is_synced': isSynced},
+      where: 'id = ?',
+      whereArgs: [employeeId],
+    );
   }
 
   Future<List<Employee>> getAllEmployees() async {
@@ -179,6 +205,7 @@ class DatabaseService {
     String? evento,
     String? tipo,
     String? duracion,
+    int isSynced = 0,
   }) async {
     final db = await database;
     return db.insert('attendance_records', {
@@ -188,7 +215,69 @@ class DatabaseService {
       'evento': evento ?? 'ENTRADA',
       'tipo': tipo ?? 'NORMAL',
       'duracion': duracion,
+      'is_synced': isSynced,
     });
+  }
+
+  Future<int> markAttendanceAsSynced(int id) async {
+    final db = await database;
+    return db.update(
+      'attendance_records',
+      {'is_synced': 1},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> getPendingAttendanceRecords() async {
+    final db = await database;
+    return db.rawQuery('''
+      SELECT ar.*, e.name AS employee_name, e.employee_code AS employee_code, e.department AS employee_department
+      FROM attendance_records ar
+      JOIN employees e ON ar.employee_id = e.id
+      WHERE ar.is_synced = 0 OR ar.is_synced IS NULL
+      ORDER BY ar.timestamp ASC
+    ''');
+  }
+
+  Future<List<Map<String, dynamic>>> getAttendanceWithSyncStatus({int? syncedFilter}) async {
+    final db = await database;
+    String whereClause = '';
+    List<dynamic> whereArgs = [];
+
+    if (syncedFilter != null) {
+      if (syncedFilter == 0) {
+        whereClause = 'WHERE (ar.is_synced = 0 OR ar.is_synced IS NULL)';
+      } else {
+        whereClause = 'WHERE ar.is_synced = ?';
+        whereArgs.add(syncedFilter);
+      }
+    }
+
+    return db.rawQuery('''
+      SELECT ar.*, e.name AS employee_name, e.employee_code AS employee_code, e.department AS employee_department
+      FROM attendance_records ar
+      JOIN employees e ON ar.employee_id = e.id
+      $whereClause
+      ORDER BY ar.timestamp DESC
+    ''', whereArgs);
+  }
+
+  Future<int> deleteAttendanceRecord(int id) async {
+    final db = await database;
+    return db.delete('attendance_records', where: 'id = ?', whereArgs: [id]);
+  }
+
+  Future<Map<String, int>> getSyncCounts() async {
+    final db = await database;
+    final total = Sqflite.firstIntValue(await db.rawQuery('SELECT COUNT(*) FROM attendance_records')) ?? 0;
+    final pending = Sqflite.firstIntValue(await db.rawQuery('SELECT COUNT(*) FROM attendance_records WHERE is_synced = 0 OR is_synced IS NULL')) ?? 0;
+    final synced = Sqflite.firstIntValue(await db.rawQuery('SELECT COUNT(*) FROM attendance_records WHERE is_synced = 1')) ?? 0;
+    return {
+      'total': total,
+      'pending': pending,
+      'synced': synced,
+    };
   }
 
   Future<Map<String, dynamic>?> getLastAttendanceForEmployee(int employeeId) async {

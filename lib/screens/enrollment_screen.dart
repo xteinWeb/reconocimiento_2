@@ -201,7 +201,9 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
               } else {
                 _status = "🎉 ¡Enrolamiento completado localmente!";
                 _isCapturing = false;
-                _subirAlServidor();
+                _database.updateEmployeeSyncStatus(_employeeId!, 0).then((_) {
+                  _subirAlServidor();
+                });
               }
             });
           }
@@ -259,6 +261,10 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
             ? null
             : _deptController.text.trim(),
       );
+
+      if (success) {
+        await _database.updateEmployeeSyncStatus(_employeeId!, 1);
+      }
 
       setState(() {
         if (success) {

@@ -5,6 +5,7 @@ class Employee {
   final String? department;
   final String? horarioId;
   final DateTime createdAt;
+  final int isSynced;
 
   Employee({
     this.id,
@@ -13,6 +14,7 @@ class Employee {
     this.department,
     this.horarioId,
     required this.createdAt,
+    this.isSynced = 1,
   });
 
   Map<String, dynamic> toMap() {
@@ -23,6 +25,7 @@ class Employee {
       'department': department,
       'horario_id': horarioId,
       'created_at': createdAt.toIso8601String(),
+      'is_synced': isSynced,
     };
   }
 
@@ -34,6 +37,7 @@ class Employee {
       department: map['department'] as String?,
       horarioId: map['horario_id'] as String?,
       createdAt: DateTime.parse(map['created_at'] as String),
+      isSynced: map['is_synced'] as int? ?? 1,
     );
   }
 }

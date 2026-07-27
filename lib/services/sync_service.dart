@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'database_service.dart';
 import 'sql_server_service.dart';
 import '../models/employee.dart';
+import '../models/face_embedding.dart';
 
 class SyncService {
   final SqlServerService _sqlServer = SqlServerService();
@@ -9,6 +10,9 @@ class SyncService {
 
   /// Sincroniza los empleados y vectores desde SQL Server central hacia SQLite local
   Future<void> sincronizarDesdeSqlServer() async {
+    // Sincronizar primero enrolamientos locales pendientes
+    await sincronizarEnrolamientosPendientes();
+
     print('[Sync] Iniciando descarga de horarios desde SQL Server...');
     try {
       final remoteSchedules = await _sqlServer.obtenerHorariosServidor();
@@ -60,6 +64,25 @@ class SyncService {
         continue;
       }
 
+      // Si el empleado ya existe localmente y no está sincronizado (enrolamiento local pendiente),
+      // no debemos sobrescribir su vector local con el del servidor (que sería viejo o vacío)
+      final db = await _database.database;
+      final existingEmployee = await db.query(
+        'employees',
+        where: 'employee_code = ?',
+        whereArgs: [cedula],
+      );
+      bool skipVectorOverwrite = false;
+      int isSynced = 1;
+      if (existingEmployee.isNotEmpty) {
+        final int localIsSynced = existingEmployee.first['is_synced'] as int? ?? 1;
+        if (localIsSynced == 0) {
+          skipVectorOverwrite = true;
+          isSynced = 0;
+          print('[Sync] Evitando sobrescribir enrolamiento local pendiente para: $nombre ($cedula)');
+        }
+      }
+
       // Insertar o actualizar el empleado en SQLite local
       final employee = Employee(
         name: nombre,
@@ -67,12 +90,13 @@ class SyncService {
         department: departamento,
         horarioId: horarioId != null && horarioId.isNotEmpty ? horarioId : null,
         createdAt: DateTime.now(),
+        isSynced: isSynced,
       );
 
       final employeeId = await _insertOrUpdateEmployee(employee);
 
       // Sincronizar el vector biométrico si existe
-      if (mapaVectorFotoStr != null && mapaVectorFotoStr.isNotEmpty) {
+      if (!skipVectorOverwrite && mapaVectorFotoStr.isNotEmpty) {
         try {
           final List<dynamic> rawVector = jsonDecode(mapaVectorFotoStr);
           final List<double> vector = rawVector.map((e) => (e as num).toDouble()).toList();
@@ -117,6 +141,72 @@ class SyncService {
     print('[Sync] Sincronización completada con éxito.');
   }
 
+  /// Sincroniza los enrolamientos locales pendientes (is_synced = 0) hacia SQL Server
+  Future<void> sincronizarEnrolamientosPendientes() async {
+    print('[Sync] Iniciando sincronización de enrolamientos locales pendientes...');
+    try {
+      final db = await _database.database;
+      final pendingEmployees = await db.query(
+        'employees',
+        where: 'is_synced = 0',
+      );
+
+      print('[Sync] Encontrados ${pendingEmployees.length} enrolamientos pendientes.');
+
+      for (final empMap in pendingEmployees) {
+        final employee = Employee.fromMap(empMap);
+        if (employee.id == null) continue;
+
+        print('[Sync] Sincronizando enrolamiento para: ${employee.name} (${employee.employeeCode})');
+        final embeddings = await _database.getEmbeddingsByEmployee(employee.id!);
+
+        if (embeddings.length < 5) {
+          print('[Sync] Advertencia: El empleado ${employee.name} tiene solo ${embeddings.length} poses guardadas. Se requieren 5.');
+          continue;
+        }
+
+        // Orden esperado por el servidor central de SQL Server
+        final expectedPoses = [
+          'Frontal',
+          'Izquierda',
+          'Derecha',
+          'Arriba',
+          'Sonrisa',
+        ];
+        final sortedPoses = <List<double>>[];
+
+        for (final poseName in expectedPoses) {
+          final match = embeddings.firstWhere(
+            (e) => e.angleType == poseName,
+            orElse: () => FaceEmbedding(
+              employeeId: employee.id!,
+              embedding: List.filled(192, 0.0),
+              angleType: poseName,
+              createdAt: DateTime.now(),
+            ),
+          );
+          sortedPoses.add(match.embedding);
+        }
+
+        final success = await subirEnrolamiento(
+          cedula: employee.employeeCode,
+          nombre: employee.name,
+          poses: sortedPoses,
+          departamento: employee.department,
+        );
+
+        if (success) {
+          await _database.updateEmployeeSyncStatus(employee.id!, 1);
+          print('[Sync] Enrolamiento subido con éxito para: ${employee.name}');
+        } else {
+          print('[Sync] Error al subir enrolamiento para: ${employee.name}');
+        }
+      }
+    } catch (e) {
+      print('[Sync] Error en sincronizarEnrolamientosPendientes: $e');
+    }
+  }
+
   /// Sube un colaborador recién enrolado localmente hacia SQL Server central
   Future<bool> subirEnrolamiento({
     required String cedula,
@@ -143,6 +233,96 @@ class SyncService {
       print('[Sync] Error al subir enrolamiento: $e');
       return false;
     }
+  }
+
+  /// Sincroniza todas las marcaciones pendientes (is_synced = 0) de SQLite con SQL Server
+  Future<Map<String, int>> sincronizarAsistenciasPendientes() async {
+    // Sincronizar primero enrolamientos locales pendientes
+    await sincronizarEnrolamientosPendientes();
+
+    final pendingRecords = await _database.getPendingAttendanceRecords();
+    int total = pendingRecords.length;
+    int successCount = 0;
+    int failCount = 0;
+
+    print('[Sync] Iniciando sincronización de $total marcaciones pendientes...');
+
+    for (final record in pendingRecords) {
+      final int recordId = record['id'] as int;
+      final String? cedula = record['employee_code']?.toString();
+      final String timestampStr = record['timestamp']?.toString() ?? '';
+      final DateTime? fechaHora = DateTime.tryParse(timestampStr);
+      final String evento = record['evento']?.toString() ?? 'ENTRADA';
+      final String tipo = record['tipo']?.toString() ?? 'NORMAL';
+      final String? duracionStr = record['duracion']?.toString();
+      final double duracion = duracionStr != null
+          ? double.tryParse(duracionStr.split(' ')[0]) ?? 0.0
+          : 0.0;
+      final String departamento = record['employee_department']?.toString() ?? '';
+
+      if (cedula == null || cedula.isEmpty || fechaHora == null) {
+        failCount++;
+        continue;
+      }
+
+      final success = await _sqlServer.guardarAsistenciaServidor(
+        cedula: cedula,
+        fechaHora: fechaHora,
+        evento: evento,
+        duracion: duracion,
+        tipo: tipo,
+        unidadNegocio: departamento,
+      );
+
+      if (success) {
+        await _database.markAttendanceAsSynced(recordId);
+        successCount++;
+        print('[Sync] Marcación #$recordId subida con éxito ($cedula).');
+      } else {
+        failCount++;
+        print('[Sync] Marcación #$recordId falló al subirse.');
+      }
+    }
+
+    print('[Sync] Proceso finalizado: $successCount exitosos, $failCount fallidos.');
+    return {
+      'total': total,
+      'success': successCount,
+      'failed': failCount,
+    };
+  }
+
+  /// Sincroniza un registro de marcación individual por su ID
+  Future<bool> sincronizarMarcacionIndividual(Map<String, dynamic> record) async {
+    final int recordId = record['id'] as int;
+    final String? cedula = record['employee_code']?.toString();
+    final String timestampStr = record['timestamp']?.toString() ?? '';
+    final DateTime? fechaHora = DateTime.tryParse(timestampStr);
+    final String evento = record['evento']?.toString() ?? 'ENTRADA';
+    final String tipo = record['tipo']?.toString() ?? 'NORMAL';
+    final String? duracionStr = record['duracion']?.toString();
+    final double duracion = duracionStr != null
+        ? double.tryParse(duracionStr.split(' ')[0]) ?? 0.0
+        : 0.0;
+    final String departamento = record['employee_department']?.toString() ?? '';
+
+    if (cedula == null || cedula.isEmpty || fechaHora == null) {
+      return false;
+    }
+
+    final success = await _sqlServer.guardarAsistenciaServidor(
+      cedula: cedula,
+      fechaHora: fechaHora,
+      evento: evento,
+      duracion: duracion,
+      tipo: tipo,
+      unidadNegocio: departamento,
+    );
+
+    if (success) {
+      await _database.markAttendanceAsSynced(recordId);
+    }
+    return success;
   }
 
   Future<int> _insertOrUpdateEmployee(Employee employee) async {
