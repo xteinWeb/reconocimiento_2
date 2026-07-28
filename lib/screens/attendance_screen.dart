@@ -8,6 +8,7 @@ import '../services/database_service.dart';
 import '../services/light_quality_service.dart';
 import '../services/sql_server_service.dart';
 import '../services/schedule_validator.dart';
+import '../services/sync_service.dart';
 import '../models/employee.dart';
 
 enum ScanState { idle, success, failure }
@@ -26,6 +27,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   final _database = DatabaseService();
   final _lightQuality = LightQualityService();
   final _sqlServer = SqlServerService();
+  final _syncService = SyncService();
 
   String _status = "Mira a la cámara para marcar";
   String _lightStatus = "";
@@ -129,7 +131,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         currentEmbedding,
         allEmbeddings,
       );
-      const threshold = 0.35; // Umbral de distancia coseno
+      const threshold = 0.20; // Umbral de distancia coseno
 
       if (distance < threshold && matchedId != null) {
         final employee = await _database.getEmployeeById(matchedId);
@@ -154,7 +156,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                 context: context,
                 builder: (ctx) => AlertDialog(
                   backgroundColor: const Color(0xFF2B3A24),
-                  title: const Text('Horario no asignado', style: TextStyle(color: Colors.white)),
+                  title: const Text(
+                    'Horario no asignado',
+                    style: TextStyle(color: Colors.white),
+                  ),
                   content: Text(
                     'El colaborador ${employee.name} no cuenta con un horario asignado en el sistema.\nPor favor, comuníquese con Recursos Humanos.',
                     style: const TextStyle(color: Colors.white70),
@@ -162,7 +167,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                   actions: [
                     TextButton(
                       onPressed: () => Navigator.of(ctx).pop(),
-                      child: const Text('Aceptar', style: TextStyle(color: Colors.amber)),
+                      child: const Text(
+                        'Aceptar',
+                        style: TextStyle(color: Colors.amber),
+                      ),
                     ),
                   ],
                 ),
@@ -207,7 +215,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                   context: context,
                   builder: (ctx) => AlertDialog(
                     backgroundColor: const Color(0xFF2B3A24),
-                    title: const Text('Salida Anticipada', style: TextStyle(color: Colors.white)),
+                    title: const Text(
+                      'Salida Anticipada',
+                      style: TextStyle(color: Colors.white),
+                    ),
                     content: Text(
                       'No tienes permitido registrar la salida antes de tu hora establecida (${horario!['hora_final']}).',
                       style: const TextStyle(color: Colors.white70),
@@ -215,7 +226,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                     actions: [
                       TextButton(
                         onPressed: () => Navigator.of(ctx).pop(),
-                        child: const Text('Aceptar', style: TextStyle(color: Colors.amber)),
+                        child: const Text(
+                          'Aceptar',
+                          style: TextStyle(color: Colors.amber),
+                        ),
                       ),
                     ],
                   ),
@@ -228,10 +242,24 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           }
 
           // 3. Validar marcación consecutiva
-          final lastRecord = await _database.getLastAttendanceForEmployee(employee.id!);
+          final lastRecord = await _database.getLastAttendanceForEmployee(
+            employee.id!,
+          );
           if (lastRecord != null) {
             final String lastEvento = lastRecord['evento'] ?? '';
-            if (lastEvento == selection) {
+            final String? lastTimestampStr = lastRecord['timestamp'];
+            bool isSameDay = false;
+            if (lastTimestampStr != null) {
+              final lastDateTime = DateTime.tryParse(lastTimestampStr);
+              if (lastDateTime != null) {
+                isSameDay =
+                    lastDateTime.year == now.year &&
+                    lastDateTime.month == now.month &&
+                    lastDateTime.day == now.day;
+              }
+            }
+
+            if (lastEvento == selection && isSameDay) {
               setState(() {
                 _status = "Registro inválido: Ya marcaste una $selection.";
                 _scanState = ScanState.failure;
@@ -242,7 +270,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                   context: context,
                   builder: (ctx) => AlertDialog(
                     backgroundColor: const Color(0xFF2B3A24),
-                    title: const Text('Registro Duplicado', style: TextStyle(color: Colors.white)),
+                    title: const Text(
+                      'Registro Duplicado',
+                      style: TextStyle(color: Colors.white),
+                    ),
                     content: Text(
                       'Ya registraste una $selection anteriormente.\nDebes registrar una ${selection == 'ENTRADA' ? 'SALIDA' : 'ENTRADA'} primero.',
                       style: const TextStyle(color: Colors.white70),
@@ -250,7 +281,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                     actions: [
                       TextButton(
                         onPressed: () => Navigator.of(ctx).pop(),
-                        child: const Text('Aceptar', style: TextStyle(color: Colors.amber)),
+                        child: const Text(
+                          'Aceptar',
+                          style: TextStyle(color: Colors.amber),
+                        ),
                       ),
                     ],
                   ),
@@ -288,20 +322,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           );
 
           // 6. Sincronización en segundo plano con el servidor SQL Server central (offline-friendly)
-          _sqlServer.guardarAsistenciaServidor(
-            cedula: employee.employeeCode,
-            fechaHora: now,
-            evento: selection,
-            tipo: tipoFinal,
-            duracion: duracionRetardo != null ? double.tryParse(duracionRetardo.split(' ')[0]) ?? 0.0 : 0.0,
-            unidadNegocio: employee.department ?? '',
-          ).then((success) async {
-            if (success) {
-              await _database.markAttendanceAsSynced(recordId);
-              print('[SqlServer] Marcación sincronizada para: ${employee.name}');
-            } else {
-              print('[SqlServer] Marcación guardada localmente (servidor offline)');
-            }
+          _syncService.sincronizarAsistenciasPendientes().then((result) {
+            print('[Sync] Sincronización automática de marcaciones: $result');
           });
 
           setState(() {
@@ -662,11 +684,7 @@ class _EventSelectionDialogState extends State<EventSelectionDialog> {
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
       title: Column(
         children: [
-          const Icon(
-            Icons.lock_person_rounded,
-            size: 48,
-            color: Colors.amber,
-          ),
+          const Icon(Icons.lock_person_rounded, size: 48, color: Colors.amber),
           const SizedBox(height: 12),
           Text(
             widget.employee.name,
@@ -680,10 +698,7 @@ class _EventSelectionDialogState extends State<EventSelectionDialog> {
           const SizedBox(height: 6),
           const Text(
             '¿Qué registro deseas realizar hoy?',
-            style: TextStyle(
-              color: Colors.white70,
-              fontSize: 14,
-            ),
+            style: TextStyle(color: Colors.white70, fontSize: 14),
             textAlign: TextAlign.center,
           ),
         ],

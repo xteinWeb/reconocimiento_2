@@ -305,4 +305,33 @@ class SqlServerService {
       await disconnect();
     }
   }
+
+  /// Obtiene las asistencias del servidor (últimos 30 días por defecto)
+  Future<List<Map<String, dynamic>>> obtenerAsistenciasServidor({int daysLimit = 30}) async {
+    final connected = await connect();
+    if (!connected) {
+      throw Exception('No se pudo conectar al servidor SQL Server.');
+    }
+
+    try {
+      print('[SqlServer] Obteniendo registros de asistencia...');
+      final results = await SqlConn.read(connectionId, """
+        SELECT 
+            id,
+            fecha_hora,
+            cedula,
+            evento,
+            duracion,
+            tipo,
+            unidad_negocio,
+            metodo_registro
+        FROM registros_asistencia
+        WHERE fecha_hora >= DATEADD(day, -$daysLimit, GETDATE())
+        ORDER BY fecha_hora DESC
+      """);
+      return results;
+    } finally {
+      await disconnect();
+    }
+  }
 }

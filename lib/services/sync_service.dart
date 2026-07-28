@@ -138,6 +138,10 @@ class SyncService {
         }
       }
     }
+
+    // Sincronizar asistencias del servidor al local (bidireccional)
+    await descargarAsistenciasDesdeSqlServer();
+
     print('[Sync] Sincronización completada con éxito.');
   }
 
@@ -344,6 +348,67 @@ class SyncService {
         whereArgs: [id],
       );
       return id;
+    }
+  }
+
+  /// Descarga asistencias desde SQL Server central hacia SQLite local (últimos 30 días)
+  Future<void> descargarAsistenciasDesdeSqlServer() async {
+    print('[Sync] Iniciando descarga de asistencias desde SQL Server...');
+    try {
+      final remoteRecords = await _sqlServer.obtenerAsistenciasServidor();
+      print('[Sync] Descargados ${remoteRecords.length} registros de asistencia desde el servidor.');
+
+      final db = await _database.database;
+
+      for (final r in remoteRecords) {
+        final String? cedula = r['cedula']?.toString().trim();
+        final String? timestampStr = r['fecha_hora']?.toString().trim();
+        final String? evento = r['evento']?.toString().trim();
+        final String? tipo = r['tipo']?.toString().trim();
+        final String? duracionStr = r['duracion']?.toString().trim();
+        
+        if (cedula == null || cedula.isEmpty || timestampStr == null || timestampStr.isEmpty) {
+          continue;
+        }
+
+        // Buscar empleado local para asociar
+        final empList = await db.query(
+          'employees',
+          where: 'employee_code = ?',
+          whereArgs: [cedula],
+        );
+        if (empList.isEmpty) {
+          continue; 
+        }
+        final int employeeId = empList.first['id'] as int;
+
+        // Estandarizar fecha
+        DateTime? parsedTime = DateTime.tryParse(timestampStr);
+        if (parsedTime == null) continue;
+        final String localTimestamp = parsedTime.toIso8601String();
+
+        // Evitar duplicados locales
+        final existing = await db.query(
+          'attendance_records',
+          where: 'employee_id = ? AND timestamp = ? AND evento = ?',
+          whereArgs: [employeeId, localTimestamp, evento],
+        );
+
+        if (existing.isEmpty) {
+          await db.insert('attendance_records', {
+            'employee_id': employeeId,
+            'timestamp': localTimestamp,
+            'confidence': 1.0,
+            'evento': evento ?? 'ENTRADA',
+            'tipo': tipo ?? 'NORMAL',
+            'duracion': duracionStr,
+            'is_synced': 1,
+          });
+          print('[Sync] Registro de asistencia descargado y guardado para empleado ID $employeeId ($evento en $localTimestamp)');
+        }
+      }
+    } catch (e) {
+      print('[Sync] Error al descargar asistencias: $e');
     }
   }
 }

@@ -18,6 +18,20 @@ class _HomeScreenState extends State<HomeScreen> {
   final _syncService = SyncService();
   bool _isSyncing = false;
 
+  @override
+  void initState() {
+    super.initState();
+    // Sincronizar automáticamente registros y enrolamientos pendientes al abrir la app
+    _syncService
+        .sincronizarAsistenciasPendientes()
+        .then((result) {
+          print('[Sync] Sincronización automática inicial completa: $result');
+        })
+        .catchError((e) {
+          print('[Sync] Error en sincronización automática inicial: $e');
+        });
+  }
+
   Future<void> _sincronizarDatos() async {
     setState(() => _isSyncing = true);
     try {
@@ -150,20 +164,6 @@ class _HomeScreenState extends State<HomeScreen> {
                 const SizedBox(height: 16),
                 _buildOptionCard(
                   context,
-                  icon: Icons.cloud_sync_rounded,
-                  title: 'Estado de Sincronización',
-                  subtitle: 'Ver registros pendientes y subir al servidor',
-                  color: AppColors.warning,
-                  onPressed: () => Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => const SyncStatusScreen(),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                _buildOptionCard(
-                  context,
                   icon: Icons.assessment_rounded,
                   title: 'Panel de Reportes',
                   subtitle: 'Estadísticas, filtrado y exportación',
@@ -185,6 +185,18 @@ class _HomeScreenState extends State<HomeScreen> {
                   onPressed: () => Navigator.push(
                     context,
                     MaterialPageRoute(builder: (_) => const AbsenceScreen()),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                _buildOptionCard(
+                  context,
+                  icon: Icons.cloud_sync_rounded,
+                  title: 'Estado de Sincronización',
+                  subtitle: 'Ver registros pendientes y subir al servidor',
+                  color: AppColors.warning,
+                  onPressed: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const SyncStatusScreen()),
                   ),
                 ),
                 const SizedBox(height: 32),
