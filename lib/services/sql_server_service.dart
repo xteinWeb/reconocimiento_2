@@ -334,4 +334,304 @@ class SqlServerService {
       await disconnect();
     }
   }
+
+  /// Obtiene los tipos de ausencia / novedades desde la tabla ITM_DOMINIOS
+  Future<List<Map<String, dynamic>>> obtenerTiposAusenciaServidor() async {
+    final connected = await connect();
+    if (!connected) {
+      throw Exception('No se pudo conectar al servidor SQL Server.');
+    }
+
+    try {
+      print('[SqlServer] Obteniendo tipos de ausencia...');
+      final results = await SqlConn.read(connectionId, """
+        SELECT 
+            VALOR1 AS sigla, 
+            VALOR2 AS nombre 
+        FROM ITM_DOMINIOS 
+        WHERE ID_DOMINIO = 'AUSENCIAS' 
+        ORDER BY VALOR2 ASC
+      """);
+      return results;
+    } finally {
+      await disconnect();
+    }
+  }
+
+  /// Guarda una novedad de ausentismo en la tabla ausentismos del servidor
+  Future<bool> guardarAusentismoServidor({
+    required String cedula,
+    required String fecha,
+    required String sigla,
+    String? observacion,
+  }) async {
+    final connected = await connect();
+    if (!connected) {
+      return false;
+    }
+
+    try {
+      print('[SqlServer] Registrando ausentismo para $cedula ($fecha - $sigla)...');
+      final query = """
+        INSERT INTO ausentismos (id, cedula_empleado, fecha, sigla_ausencia, observacion, fecha_registro_servidor)
+        VALUES (
+          CAST(NEWID() AS VARCHAR(36)),
+          '${cedula.replaceAll("'", "''")}',
+          '${fecha.replaceAll("'", "''")}',
+          '${sigla.replaceAll("'", "''")}',
+          ${observacion != null ? "'${observacion.replaceAll("'", "''")}'" : "NULL"},
+          GETDATE()
+        )
+      """;
+      await SqlConn.write(connectionId, query);
+      return true;
+    } catch (e) {
+      print('[SqlServer] Error al guardar ausentismo en el servidor: $e');
+      return false;
+    } finally {
+      await disconnect();
+    }
+  }
+
+  /// Genera novedades de tipo LLT (Llegada Tarde) en el servidor central
+  Future<void> autogenerarLltEnServidor() async {
+    final connected = await connect();
+    if (!connected) return;
+
+    try {
+      print('[SqlServer] Autogenerando novedades de LLT...');
+      const query = """
+        INSERT INTO ausentismos (id, cedula_empleado, fecha, sigla_ausencia, observacion, fecha_registro_servidor)
+        SELECT 
+            CAST(NEWID() AS VARCHAR(36)),
+            ra.cedula,
+            CONVERT(VARCHAR(10), ra.fecha_hora, 120),
+            'LLT',
+            'Retardo: ' + CAST(ra.duracion AS VARCHAR(20)) + ' min',
+            GETDATE()
+        FROM registros_asistencia ra
+        WHERE ra.evento = 'ENTRADA' 
+          AND ra.tipo = 'RETARDO'
+          AND NOT EXISTS (
+              SELECT 1 
+              FROM ausentismos a 
+              WHERE a.cedula_empleado = ra.cedula 
+                AND a.fecha = CONVERT(VARCHAR(10), ra.fecha_hora, 120)
+                AND a.sigla_ausencia = 'LLT'
+          )
+      """;
+      await SqlConn.write(connectionId, query);
+    } catch (e) {
+      print('[SqlServer] Error al autogenerar LLT en el servidor: $e');
+    } finally {
+      await disconnect();
+    }
+  }
+
+  /// Genera novedades de tipo SC (Sin Justa Causa) en el servidor central para una fecha dada
+  Future<void> autogenerarScEnServidor(String fecha) async {
+    final connected = await connect();
+    if (!connected) return;
+
+    try {
+      print('[SqlServer] Autogenerando ausentismos SC para la fecha $fecha...');
+      final query = """
+        INSERT INTO ausentismos (id, cedula_empleado, fecha, sigla_ausencia, observacion, fecha_registro_servidor)
+        SELECT 
+            CAST(NEWID() AS VARCHAR(36)),
+            ea.cedula,
+            '$fecha',
+            'SC',
+            'Falta sin justa causa',
+            GETDATE()
+        FROM empleados_asistencia ea
+        WHERE ea.estado = 'ACTIVO'
+          AND NOT EXISTS (
+              SELECT 1 
+              FROM registros_asistencia ra 
+              WHERE ra.cedula = ea.cedula 
+                AND ra.evento = 'ENTRADA' 
+                AND CONVERT(VARCHAR(10), ra.fecha_hora, 120) = '$fecha'
+          )
+          AND NOT EXISTS (
+              SELECT 1 
+              FROM ausentismos a 
+              WHERE a.cedula_empleado = ea.cedula 
+                AND a.fecha = '$fecha'
+          )
+      """;
+      await SqlConn.write(connectionId, query);
+    } catch (e) {
+      print('[SqlServer] Error al autogenerar SC en el servidor: $e');
+    } finally {
+      await disconnect();
+    }
+  }
+
+  /// Asegura que existan las tablas de control de dispositivos en SQL Server
+  Future<void> asegurarTablasDispositivosEnServidor() async {
+    final connected = await connect();
+    if (!connected) return;
+
+    try {
+      print('[SqlServer] Asegurando tablas de control de tótems...');
+      
+      // Tabla de dispositivos autorizados
+      await SqlConn.write(connectionId, """
+        IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='dispositivos_autorizados' AND xtype='U')
+        BEGIN
+          CREATE TABLE dispositivos_autorizados (
+              id_dispositivo VARCHAR(100) PRIMARY KEY,
+              descripcion VARCHAR(200),
+              en_uso INT DEFAULT 0
+          );
+        END
+      """);
+
+      // Insertar los dispositivos autorizados si no están ya en la tabla
+      await SqlConn.write(connectionId, """
+        IF EXISTS (SELECT * FROM sysobjects WHERE name='dispositivos_autorizados' AND xtype='U')
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM dispositivos_autorizados WHERE id_dispositivo = 'Galapa')
+            INSERT INTO dispositivos_autorizados (id_dispositivo, descripcion, en_uso) VALUES ('Galapa', 'Sede Galapa', 0);
+          IF NOT EXISTS (SELECT 1 FROM dispositivos_autorizados WHERE id_dispositivo = 'rebolo')
+            INSERT INTO dispositivos_autorizados (id_dispositivo, descripcion, en_uso) VALUES ('rebolo', 'Sede Rebolo', 0);
+          IF NOT EXISTS (SELECT 1 FROM dispositivos_autorizados WHERE id_dispositivo = 'calle28')
+            INSERT INTO dispositivos_autorizados (id_dispositivo, descripcion, en_uso) VALUES ('calle28', 'Sede Calle 28', 0);
+          IF NOT EXISTS (SELECT 1 FROM dispositivos_autorizados WHERE id_dispositivo = 'calle39')
+            INSERT INTO dispositivos_autorizados (id_dispositivo, descripcion, en_uso) VALUES ('calle39', 'Sede Calle 39', 0);
+        END
+      """);
+
+      // Tabla de latidos/actividad
+      await SqlConn.write(connectionId, """
+        IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='estado_totems' AND xtype='U')
+        CREATE TABLE estado_totems (
+            id_dispositivo VARCHAR(100) PRIMARY KEY,
+            ultima_sincronizacion DATETIME NOT NULL
+        )
+      """);
+    } catch (e) {
+      print('[SqlServer] Error al asegurar tablas de tótems en el servidor: $e');
+    } finally {
+      await disconnect();
+    }
+  }
+
+  /// Obtiene los tótems autorizados en el servidor
+  Future<List<Map<String, dynamic>>> obtenerDispositivosDisponibles() async {
+    final connected = await connect();
+    if (!connected) return [];
+
+    try {
+      print('[SqlServer] Consultando dispositivos autorizados...');
+      final results = await SqlConn.read(connectionId, "SELECT id_dispositivo, descripcion, en_uso FROM dispositivos_autorizados ORDER BY id_dispositivo ASC");
+      return results;
+    } catch (e) {
+      print('[SqlServer] Error al consultar dispositivos autorizados: $e');
+      return [];
+    } finally {
+      await disconnect();
+    }
+  }
+
+  /// Registra el uso de un dispositivo y libera el anterior en el servidor central
+  Future<bool> registrarUsoDispositivo(String idDispositivo, String? idAnterior) async {
+    final connected = await connect();
+    if (!connected) return false;
+
+    try {
+      print('[SqlServer] Registrando uso para $idDispositivo (Anterior: $idAnterior)...');
+      
+      // Liberar el anterior si aplica
+      if (idAnterior != null && idAnterior.isNotEmpty && idAnterior != idDispositivo) {
+        await SqlConn.write(connectionId, "UPDATE dispositivos_autorizados SET en_uso = 0 WHERE id_dispositivo = '${idAnterior.replaceAll("'", "''")}'");
+      }
+
+      // Marcar el nuevo en uso
+      await SqlConn.write(connectionId, "UPDATE dispositivos_autorizados SET en_uso = 1 WHERE id_dispositivo = '${idDispositivo.replaceAll("'", "''")}'");
+
+      // Registrar latido/sincronización inicial en estado_totems
+      final safeId = idDispositivo.replaceAll("'", "''");
+      await SqlConn.write(connectionId, """
+        MERGE estado_totems AS target
+        USING (SELECT '$safeId' AS id_dispositivo) AS source
+        ON (target.id_dispositivo = source.id_dispositivo)
+        WHEN MATCHED THEN
+            UPDATE SET ultima_sincronizacion = GETDATE()
+        WHEN NOT MATCHED THEN
+            INSERT (id_dispositivo, ultima_sincronizacion)
+            VALUES (source.id_dispositivo, GETDATE());
+      """);
+
+      return true;
+    } catch (e) {
+      print('[SqlServer] Error al registrar uso de dispositivo: $e');
+      return false;
+    } finally {
+      await disconnect();
+    }
+  }
+
+  /// Reporta el latido/sincronización de este dispositivo al servidor central
+  Future<void> reportarSincronizacionTotem(String idDispositivo) async {
+    final connected = await connect();
+    if (!connected) return;
+
+    try {
+      final safeId = idDispositivo.replaceAll("'", "''");
+      await SqlConn.write(connectionId, """
+        MERGE estado_totems AS target
+        USING (SELECT '$safeId' AS id_dispositivo) AS source
+        ON (target.id_dispositivo = source.id_dispositivo)
+        WHEN MATCHED THEN
+            UPDATE SET ultima_sincronizacion = GETDATE()
+        WHEN NOT MATCHED THEN
+            INSERT (id_dispositivo, ultima_sincronizacion)
+            VALUES (source.id_dispositivo, GETDATE());
+      """);
+      print('[SqlServer] Sincronización del dispositivo $idDispositivo reportada con éxito.');
+    } catch (e) {
+      print('[SqlServer] Error al reportar sincronización del dispositivo: $e');
+    } finally {
+      await disconnect();
+    }
+  }
+
+  /// Valida si todos los tótems activos en las últimas 24 horas ya sincronizaron hoy después de las 4:00 PM
+  Future<bool> validarSincronizacionTotalHoy() async {
+    final connected = await connect();
+    if (!connected) return false;
+
+    try {
+      print('[SqlServer] Validando estado de sincronización de todos los tótems activos...');
+      final results = await SqlConn.read(connectionId, """
+        SELECT COUNT(*) as pendientes
+        FROM estado_totems
+        WHERE ultima_sincronizacion >= DATEADD(day, -1, GETDATE()) -- Activos en últimas 24h
+          AND (
+            -- Sincronizaron hoy antes de las 16:00
+            ultima_sincronizacion < DATEADD(hour, 16, CAST(CONVERT(VARCHAR(10), GETDATE(), 120) AS DATETIME))
+            -- O bien, no han sincronizado hoy en lo absoluto
+            OR CONVERT(VARCHAR(10), ultima_sincronizacion, 120) < CONVERT(VARCHAR(10), GETDATE(), 120)
+          )
+      """);
+
+      if (results.isNotEmpty) {
+        final val = results.first['pendientes'] ?? results.first['PENDIENTES'];
+        final int pendientes = int.tryParse(val.toString()) ?? 0;
+        if (pendientes > 0) {
+          print('[SqlServer] Validación de sincronización fallida: Hay $pendientes tótems activos pendientes por reportar datos.');
+          return false;
+        }
+      }
+      print('[SqlServer] Validación de sincronización exitosa: Todos los tótems activos están al día.');
+      return true;
+    } catch (e) {
+      print('[SqlServer] Error al validar sincronización total de tótems: $e');
+      return false;
+    } finally {
+      await disconnect();
+    }
+  }
 }

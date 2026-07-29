@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../services/database_service.dart';
+import '../services/sync_service.dart';
 import '../models/employee.dart';
 import '../theme/app_colors.dart';
 
@@ -13,12 +14,14 @@ class AbsenceScreen extends StatefulWidget {
 
 class _AbsenceScreenState extends State<AbsenceScreen> with SingleTickerProviderStateMixin {
   final _database = DatabaseService();
+  final _syncService = SyncService();
   DateTime _selectedDate = DateTime.now();
   late TabController _tabController;
 
   List<Employee> _employees = [];
   List<Map<String, dynamic>> _attendanceRecords = [];
   List<Map<String, dynamic>> _absences = [];
+  List<Map<String, dynamic>> _absenceTypes = [];
   bool _isLoading = true;
   String _searchQuery = '';
 
@@ -54,6 +57,17 @@ class _AbsenceScreenState extends State<AbsenceScreen> with SingleTickerProvider
       // 3. Obtener ausentismos del día
       final abs = await _database.getAbsencesByDate(dateStr);
 
+      // 4. Obtener tipos de ausencia dinámicos
+      List<Map<String, dynamic>> types = await _database.getAllAbsenceTypes();
+      if (types.isEmpty) {
+        types = [
+          {'sigla': 'F', 'nombre': 'Falta Injustificada'},
+          {'sigla': 'V', 'nombre': 'Vacaciones'},
+          {'sigla': 'I', 'nombre': 'Incapacidad Médica'},
+          {'sigla': 'P', 'nombre': 'Permiso Especial'},
+        ];
+      }
+
       // Calcular estadísticas
       int countAsistieron = 0;
       int countAusentes = 0;
@@ -76,6 +90,7 @@ class _AbsenceScreenState extends State<AbsenceScreen> with SingleTickerProvider
         _employees = emps;
         _attendanceRecords = atts;
         _absences = abs;
+        _absenceTypes = types;
         _countAsistieron = countAsistieron;
         _countAusentes = countAusentes;
         _countJustificados = countJustificados;
@@ -117,7 +132,7 @@ class _AbsenceScreenState extends State<AbsenceScreen> with SingleTickerProvider
 
   void _showJustificationDialog(Employee employee, Map<String, dynamic>? existingAbsence) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    String selectedSigla = existingAbsence?['sigla_ausencia'] ?? 'F';
+    String selectedSigla = existingAbsence?['sigla_ausencia'] ?? (_absenceTypes.isNotEmpty ? _absenceTypes.first['sigla'] : 'F');
     final noteController = TextEditingController(text: existingAbsence?['observacion'] ?? '');
 
     showDialog(
@@ -151,12 +166,14 @@ class _AbsenceScreenState extends State<AbsenceScreen> with SingleTickerProvider
                     value: selectedSigla,
                     isExpanded: true,
                     style: const TextStyle(color: Colors.white),
-                    items: const [
-                      DropdownMenuItem(value: 'F', child: Text('F - Falta Injustificada')),
-                      DropdownMenuItem(value: 'V', child: Text('V - Vacaciones')),
-                      DropdownMenuItem(value: 'I', child: Text('I - Incapacidad Médica')),
-                      DropdownMenuItem(value: 'P', child: Text('P - Permiso Especial')),
-                    ],
+                    items: _absenceTypes.map((t) {
+                      final sigla = t['sigla'].toString();
+                      final nombre = t['nombre'].toString();
+                      return DropdownMenuItem<String>(
+                        value: sigla,
+                        child: Text('$sigla - $nombre'),
+                      );
+                    }).toList(),
                     onChanged: (val) {
                       if (val != null) {
                         setDialogState(() {
@@ -218,6 +235,11 @@ class _AbsenceScreenState extends State<AbsenceScreen> with SingleTickerProvider
                     );
                     Navigator.of(ctx).pop();
                     _loadData();
+
+                    // Sincronizar en segundo plano
+                    _syncService.sincronizarAusenciasPendientes().then((result) {
+                      print('[Sync] Sincronización automática de ausencias: $result');
+                    });
                   },
                   child: const Text('Guardar'),
                 ),
@@ -230,7 +252,7 @@ class _AbsenceScreenState extends State<AbsenceScreen> with SingleTickerProvider
   }
 
   Color _getSiglaColor(String sigla) {
-    switch (sigla) {
+    switch (sigla.toUpperCase()) {
       case 'F':
         return Colors.redAccent.shade700;
       case 'V':
@@ -240,12 +262,20 @@ class _AbsenceScreenState extends State<AbsenceScreen> with SingleTickerProvider
       case 'P':
         return Colors.amber.shade800;
       default:
-        return Colors.grey;
+        return Colors.grey.shade700;
     }
   }
 
   String _getSiglaName(String sigla) {
-    switch (sigla) {
+    final match = _absenceTypes.firstWhere(
+      (t) => t['sigla'].toString().trim().toUpperCase() == sigla.trim().toUpperCase(),
+      orElse: () => <String, dynamic>{},
+    );
+    if (match.isNotEmpty) {
+      return match['nombre'].toString();
+    }
+
+    switch (sigla.toUpperCase()) {
       case 'F':
         return 'Falta';
       case 'V':

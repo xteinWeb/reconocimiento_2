@@ -15,7 +15,7 @@ class DatabaseService {
     final path = join(await getDatabasesPath(), 'attendance.db');
     return openDatabase(
       path,
-      version: 5,
+      version: 9,
       onCreate: _createDB,
       onUpgrade: _onUpgrade,
     );
@@ -55,6 +55,7 @@ class DatabaseService {
         tipo TEXT,
         duracion TEXT,
         is_synced INTEGER DEFAULT 0,
+        metodo_registro TEXT DEFAULT 'FACIAL',
         FOREIGN KEY (employee_id) REFERENCES employees(id)
       )
     ''');
@@ -76,8 +77,23 @@ class DatabaseService {
         date TEXT NOT NULL,
         sigla_ausencia TEXT NOT NULL,
         observacion TEXT,
+        is_synced INTEGER DEFAULT 0,
         FOREIGN KEY (employee_id) REFERENCES employees(id),
         UNIQUE(employee_id, date) ON CONFLICT REPLACE
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE absence_types (
+        sigla TEXT PRIMARY KEY,
+        nombre TEXT NOT NULL
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE system_config (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
       )
     ''');
   }
@@ -141,6 +157,63 @@ class DatabaseService {
         print('Column is_synced already exists in employees or error: $e');
       }
     }
+    if (oldVersion < 6) {
+      try {
+        await db.execute("ALTER TABLE attendance_records ADD COLUMN metodo_registro TEXT DEFAULT 'FACIAL'");
+      } catch (e) {
+        print('Column metodo_registro already exists in attendance_records or error: $e');
+      }
+    }
+    if (oldVersion < 7) {
+      try {
+        await db.execute('''
+          CREATE TABLE IF NOT EXISTS absence_types (
+            sigla TEXT PRIMARY KEY,
+            nombre TEXT NOT NULL
+          )
+        ''');
+      } catch (e) {
+        print('Error creating absence_types table: $e');
+      }
+    }
+    if (oldVersion < 8) {
+      try {
+        await db.execute('ALTER TABLE absences ADD COLUMN is_synced INTEGER DEFAULT 0');
+      } catch (e) {
+        print('Column is_synced already exists in absences or error: $e');
+      }
+    }
+    if (oldVersion < 9) {
+      try {
+        await db.execute('''
+          CREATE TABLE IF NOT EXISTS system_config (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+          )
+        ''');
+      } catch (e) {
+        print('Error creating system_config table: $e');
+      }
+    }
+  }
+
+  // CONFIGURACIÓN DE SISTEMA
+  Future<String?> getDeviceId() async {
+    final db = await database;
+    final res = await db.query('system_config', where: 'key = ?', whereArgs: ['device_id']);
+    if (res.isNotEmpty) {
+      return res.first['value'] as String;
+    }
+    return null;
+  }
+
+  Future<void> saveDeviceId(String deviceId) async {
+    final db = await database;
+    await db.insert(
+      'system_config',
+      {'key': 'device_id', 'value': deviceId},
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
   }
 
   // EMPLEADOS
@@ -168,6 +241,13 @@ class DatabaseService {
   Future<Employee?> getEmployeeById(int id) async {
     final db = await database;
     final maps = await db.query('employees', where: 'id = ?', whereArgs: [id]);
+    if (maps.isEmpty) return null;
+    return Employee.fromMap(maps.first);
+  }
+
+  Future<Employee?> getEmployeeByCode(String code) async {
+    final db = await database;
+    final maps = await db.query('employees', where: 'employee_code = ?', whereArgs: [code]);
     if (maps.isEmpty) return null;
     return Employee.fromMap(maps.first);
   }
@@ -206,6 +286,7 @@ class DatabaseService {
     String? tipo,
     String? duracion,
     int isSynced = 0,
+    String metodoRegistro = 'FACIAL',
   }) async {
     final db = await database;
     return db.insert('attendance_records', {
@@ -216,6 +297,7 @@ class DatabaseService {
       'tipo': tipo ?? 'NORMAL',
       'duracion': duracion,
       'is_synced': isSynced,
+      'metodo_registro': metodoRegistro,
     });
   }
 
@@ -370,7 +452,7 @@ class DatabaseService {
   }
 
   // AUSENTISMOS / ABSENCES
-  Future<int> saveAbsence(int employeeId, String date, String sigla, String? observacion) async {
+  Future<int> saveAbsence(int employeeId, String date, String sigla, String? observacion, {int isSynced = 0}) async {
     final db = await database;
     return db.insert(
       'absences',
@@ -379,9 +461,30 @@ class DatabaseService {
         'date': date,
         'sigla_ausencia': sigla,
         'observacion': observacion,
+        'is_synced': isSynced,
       },
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+  }
+
+  Future<int> markAbsenceAsSynced(int employeeId, String date) async {
+    final db = await database;
+    return db.update(
+      'absences',
+      {'is_synced': 1},
+      where: 'employee_id = ? AND date = ?',
+      whereArgs: [employeeId, date],
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> getPendingAbsences() async {
+    final db = await database;
+    return db.rawQuery('''
+      SELECT a.*, e.employee_code AS employee_code
+      FROM absences a
+      JOIN employees e ON a.employee_id = e.id
+      WHERE a.is_synced = 0 OR a.is_synced IS NULL
+    ''');
   }
 
   Future<List<Map<String, dynamic>>> getAbsencesByDate(String date) async {
@@ -401,5 +504,20 @@ class DatabaseService {
       where: 'employee_id = ? AND date = ?',
       whereArgs: [employeeId, date],
     );
+  }
+
+  // TIPOS DE AUSENCIA / NOVEDADES
+  Future<int> saveAbsenceType(Map<String, dynamic> type) async {
+    final db = await database;
+    return db.insert(
+      'absence_types',
+      type,
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> getAllAbsenceTypes() async {
+    final db = await database;
+    return db.query('absence_types', orderBy: 'nombre ASC');
   }
 }

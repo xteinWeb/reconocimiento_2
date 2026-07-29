@@ -85,5 +85,32 @@ class FaceRecognitionService {
     return (matchedEmployeeId, minDistance);
   }
 
+  /// Encuentra los N embeddings más cercanos y devuelve lista de (employeeId, distance)
+  List<(int, double)> findTopMatches(
+    List<double> queryEmbedding,
+    List<Map<String, dynamic>> allEmbeddings, {
+    int limit = 3,
+  }) {
+    if (allEmbeddings.isEmpty) return [];
+
+    final List<(int, double)> matches = [];
+
+    for (final row in allEmbeddings) {
+      final storedEmbedding = (row['embedding'] as String)
+          .split(',')
+          .map((e) => double.parse(e))
+          .toList();
+
+      final distance = cosineDistance(queryEmbedding, storedEmbedding);
+      final employeeId = row['employee_id'] as int;
+      matches.add((employeeId, distance));
+    }
+
+    // Ordenar de menor a mayor distancia
+    matches.sort((a, b) => a.$2.compareTo(b.$2));
+
+    return matches.take(limit).toList();
+  }
+
   void dispose() => _interpreter?.close();
 }

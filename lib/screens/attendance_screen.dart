@@ -39,6 +39,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   // Estado del resultado de escaneo para feedback visual
   ScanState _scanState = ScanState.idle;
   Employee? _recognizedEmployee;
+  List<Map<String, dynamic>> _topMatches = [];
 
   @override
   void initState() {
@@ -67,7 +68,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   Future<void> _markAttendance() async {
     if (_isProcessing || !mounted) return;
-    setState(() => _isProcessing = true);
+    setState(() {
+      _isProcessing = true;
+      _topMatches = [];
+    });
 
     try {
       final file = await _cameraService.takePicture();
@@ -131,7 +135,32 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         currentEmbedding,
         allEmbeddings,
       );
-      const threshold = 0.20; // Umbral de distancia coseno
+
+      // Obtener las 3 mejores coincidencias para depuración/testing
+      final topMatchesRaw = _faceRecognition.findTopMatches(
+        currentEmbedding,
+        allEmbeddings,
+        limit: 3,
+      );
+
+      final List<Map<String, dynamic>> resolvedMatches = [];
+      for (final match in topMatchesRaw) {
+        final empId = match.$1;
+        final dist = match.$2;
+        final employee = await _database.getEmployeeById(empId);
+        if (employee != null) {
+          resolvedMatches.add({'employee': employee, 'distance': dist});
+        }
+      }
+
+      setState(() {
+        _topMatches = resolvedMatches;
+      });
+
+      debugPrint(
+        '[FaceRecognition] ID detectado: $matchedId, Distancia calculada: ${distance.toStringAsFixed(4)}',
+      );
+      const threshold = 0.15;
 
       if (distance < threshold && matchedId != null) {
         final employee = await _database.getEmployeeById(matchedId);
@@ -339,6 +368,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                 _scanState = ScanState.idle;
                 _recognizedEmployee = null;
                 _status = "Mira a la cámara para marcar";
+                _topMatches = [];
               });
               _resumeAutoTimerAfterDelay();
             }
@@ -354,6 +384,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             setState(() {
               _scanState = ScanState.idle;
               _status = "Mira a la cámara para marcar";
+              _topMatches = [];
             });
           }
         });
@@ -385,6 +416,305 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     setState(() {
       _isProcessing = false;
     });
+  }
+
+  Future<void> _marcarConCedula() async {
+    _autoTimer?.cancel();
+
+    final controller = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+
+    final cedula = await showDialog<String>(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E1E),
+        title: const Text(
+          'Marcación por Cédula',
+          style: TextStyle(color: Colors.white),
+        ),
+        content: Form(
+          key: formKey,
+          child: TextFormField(
+            controller: controller,
+            keyboardType: TextInputType.number,
+            style: const TextStyle(color: Colors.white),
+            decoration: const InputDecoration(
+              labelText: 'Número de Cédula',
+              labelStyle: TextStyle(color: Colors.cyanAccent),
+              enabledBorder: UnderlineInputBorder(
+                borderSide: BorderSide(color: Colors.white54),
+              ),
+              focusedBorder: UnderlineInputBorder(
+                borderSide: BorderSide(color: Colors.cyanAccent),
+              ),
+            ),
+            validator: (value) {
+              if (value == null || value.trim().isEmpty) {
+                return 'Por favor ingresa la cédula';
+              }
+              return null;
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(null),
+            child: const Text(
+              'Cancelar',
+              style: TextStyle(color: Colors.white54),
+            ),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              if (formKey.currentState!.validate()) {
+                Navigator.of(ctx).pop(controller.text.trim());
+              }
+            },
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.cyanAccent),
+            child: const Text(
+              'Aceptar',
+              style: TextStyle(color: Colors.black87),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (cedula == null || cedula.isEmpty) {
+      _resumeAutoTimerAfterDelay();
+      return;
+    }
+
+    setState(() {
+      _isProcessing = true;
+      _status = "Buscando colaborador...";
+    });
+
+    try {
+      final employee = await _database.getEmployeeByCode(cedula);
+      if (employee == null) {
+        setState(() {
+          _status = "Cédula no encontrada en el dispositivo.";
+          _scanState = ScanState.failure;
+          _isProcessing = false;
+        });
+        _resumeAutoTimerAfterDelay();
+        return;
+      }
+
+      Map<String, dynamic>? horario;
+      if (employee.horarioId != null) {
+        horario = await _database.getScheduleById(employee.horarioId!);
+      }
+
+      if (horario == null) {
+        setState(() {
+          _status = "Acceso denegado: Sin horario asignado.";
+          _scanState = ScanState.failure;
+          _isProcessing = false;
+        });
+
+        if (mounted) {
+          await showDialog(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              backgroundColor: const Color(0xFF2B3A24),
+              title: const Text(
+                'Horario no asignado',
+                style: TextStyle(color: Colors.white),
+              ),
+              content: Text(
+                'El colaborador ${employee.name} no cuenta con un horario asignado en el sistema.\nPor favor, comuníquese con Recursos Humanos.',
+                style: const TextStyle(color: Colors.white70),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(),
+                  child: const Text(
+                    'Aceptar',
+                    style: TextStyle(color: Colors.amber),
+                  ),
+                ),
+              ],
+            ),
+          );
+        }
+
+        _resumeAutoTimerAfterDelay();
+        return;
+      }
+
+      if (!mounted) return;
+      final selection = await showDialog<String>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => EventSelectionDialog(employee: employee),
+      );
+
+      if (selection == null) {
+        setState(() {
+          _status = "Marcación cancelada por inactividad.";
+          _scanState = ScanState.failure;
+          _isProcessing = false;
+        });
+        _resumeAutoTimerAfterDelay();
+        return;
+      }
+
+      final now = DateTime.now();
+
+      if (selection == 'SALIDA') {
+        final esTemprana = ScheduleValidator.esSalidaTemprana(horario, now);
+        if (esTemprana) {
+          setState(() {
+            _status = "Registro inválido: Salida anticipada.";
+            _scanState = ScanState.failure;
+            _isProcessing = false;
+          });
+
+          if (mounted) {
+            await showDialog(
+              context: context,
+              builder: (ctx) => AlertDialog(
+                backgroundColor: const Color(0xFF2B3A24),
+                title: const Text(
+                  'Salida Anticipada',
+                  style: TextStyle(color: Colors.white),
+                ),
+                content: Text(
+                  'No tienes permitido registrar la salida antes de tu hora establecida (${horario!['hora_final']}).',
+                  style: const TextStyle(color: Colors.white70),
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(ctx).pop(),
+                    child: const Text(
+                      'Aceptar',
+                      style: TextStyle(color: Colors.amber),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }
+
+          _resumeAutoTimerAfterDelay();
+          return;
+        }
+      }
+
+      final lastRecord = await _database.getLastAttendanceForEmployee(
+        employee.id!,
+      );
+      if (lastRecord != null) {
+        final String lastEvento = lastRecord['evento'] ?? '';
+        final String? lastTimestampStr = lastRecord['timestamp'];
+        bool isSameDay = false;
+        if (lastTimestampStr != null) {
+          final lastDateTime = DateTime.tryParse(lastTimestampStr);
+          if (lastDateTime != null) {
+            isSameDay =
+                lastDateTime.year == now.year &&
+                lastDateTime.month == now.month &&
+                lastDateTime.day == now.day;
+          }
+        }
+
+        if (lastEvento == selection && isSameDay) {
+          setState(() {
+            _status = "Registro inválido: Ya marcaste una $selection.";
+            _scanState = ScanState.failure;
+            _isProcessing = false;
+          });
+
+          if (mounted) {
+            await showDialog(
+              context: context,
+              builder: (ctx) => AlertDialog(
+                backgroundColor: const Color(0xFF2B3A24),
+                title: const Text(
+                  'Registro Duplicado',
+                  style: TextStyle(color: Colors.white),
+                ),
+                content: Text(
+                  'Ya registraste una $selection anteriormente.\nDebes registrar una ${selection == 'ENTRADA' ? 'SALIDA' : 'ENTRADA'} primero.',
+                  style: const TextStyle(color: Colors.white70),
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(ctx).pop(),
+                    child: const Text(
+                      'Aceptar',
+                      style: TextStyle(color: Colors.amber),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }
+
+          _resumeAutoTimerAfterDelay();
+          return;
+        }
+      }
+
+      String tipoFinal = 'NORMAL';
+      String? duracionRetardo;
+      String feedbackMsg = '¡Asistencia registrada!';
+
+      if (selection == 'ENTRADA') {
+        final validation = ScheduleValidator.validarMarcacion(horario, now);
+        tipoFinal = validation.tipo;
+        duracionRetardo = validation.duracion;
+        feedbackMsg = validation.descripcion;
+      } else {
+        feedbackMsg = 'Salida registrada. ¡Hasta mañana!';
+      }
+
+      final recordId = await _database.insertAttendance(
+        employee.id!,
+        now,
+        0.0,
+        evento: selection,
+        tipo: tipoFinal,
+        duracion: duracionRetardo,
+        isSynced: 0,
+        metodoRegistro: 'CEDULA',
+      );
+
+      setState(() {
+        _status = feedbackMsg;
+        _scanState = ScanState.success;
+        _recognizedEmployee = employee;
+        _isProcessing = false;
+      });
+
+      _syncService.sincronizarAsistenciasPendientes().then((result) {
+        print(
+          '[Sync] Sincronización automática de marcaciones por cédula: $result',
+        );
+      });
+
+      await Future.delayed(const Duration(seconds: 4));
+      if (mounted) {
+        setState(() {
+          _recognizedEmployee = null;
+          _status = _isAutoMode
+              ? "Mira a la cámara para marcar"
+              : "Presiona Marcar para escanear";
+          _scanState = ScanState.idle;
+        });
+        _resumeAutoTimerAfterDelay();
+      }
+    } catch (e) {
+      setState(() {
+        _status = "Error al marcar: $e";
+        _scanState = ScanState.failure;
+        _isProcessing = false;
+      });
+      _resumeAutoTimerAfterDelay();
+    }
   }
 
   @override
@@ -597,6 +927,104 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                   ),
                   textAlign: TextAlign.center,
                 ),
+                if (_topMatches.isNotEmpty) ...[
+                  const SizedBox(height: 16),
+                  const Divider(color: Colors.white24, height: 1),
+                  const SizedBox(height: 12),
+                  const Text(
+                    "Top 3 Coincidencias de Lectura Facial",
+                    style: TextStyle(
+                      color: Colors.white70,
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Column(
+                    children: _topMatches.map((match) {
+                      final employee = match['employee'] as Employee;
+                      final distance = match['distance'] as double;
+                      final percentage = ((1.0 - distance) * 100).clamp(
+                        0.0,
+                        100.0,
+                      );
+
+                      // Highlight if it's below the threshold (recognized)
+                      final isMatch = distance < 0.2;
+
+                      return Container(
+                        margin: const EdgeInsets.symmetric(vertical: 4),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 8,
+                        ),
+                        decoration: BoxDecoration(
+                          color: isMatch
+                              ? Colors.green.withOpacity(0.1)
+                              : Colors.white.withOpacity(0.05),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: isMatch
+                                ? Colors.greenAccent.withOpacity(0.5)
+                                : Colors.white12,
+                            width: 1,
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    employee.name,
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  Text(
+                                    'Cod: ${employee.employeeCode} | Dept: ${employee.department ?? "N/A"}',
+                                    style: const TextStyle(
+                                      color: Colors.white54,
+                                      fontSize: 11,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.end,
+                              children: [
+                                Text(
+                                  'Distancia: ${distance.toStringAsFixed(4)}',
+                                  style: TextStyle(
+                                    color: isMatch
+                                        ? Colors.greenAccent
+                                        : Colors.amberAccent,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                                Text(
+                                  'Similitud: ${percentage.toStringAsFixed(1)}%',
+                                  style: const TextStyle(
+                                    color: Colors.white38,
+                                    fontSize: 10,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                ],
                 if (!_isAutoMode) ...[
                   const SizedBox(height: 16),
                   ElevatedButton.icon(
@@ -625,6 +1053,23 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                     ),
                   ),
                 ],
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  onPressed: _isProcessing ? null : _marcarConCedula,
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.cyanAccent,
+                    side: const BorderSide(color: Colors.cyanAccent),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    minimumSize: const Size(double.infinity, 50),
+                  ),
+                  icon: const Icon(Icons.badge_outlined),
+                  label: const Text(
+                    'Marcar con Cédula',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
               ],
             ),
           ),
@@ -782,6 +1227,18 @@ class _EventSelectionDialogState extends State<EventSelectionDialog> {
           ),
         ],
       ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(null),
+          child: const Text(
+            'CANCELAR',
+            style: TextStyle(
+              color: Colors.redAccent,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

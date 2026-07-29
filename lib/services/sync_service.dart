@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:async';
 import 'database_service.dart';
 import 'sql_server_service.dart';
 import '../models/employee.dart';
@@ -10,6 +11,14 @@ class SyncService {
 
   /// Sincroniza los empleados y vectores desde SQL Server central hacia SQLite local
   Future<void> sincronizarDesdeSqlServer() async {
+    // Reportar latido del dispositivo antes de iniciar la sincronización
+    final deviceId = await _database.getDeviceId();
+    if (deviceId != null && deviceId.isNotEmpty) {
+      await _sqlServer.reportarSincronizacionTotem(deviceId);
+    } else {
+      print('[Sync] Advertencia: Este tótem no tiene un identificador de dispositivo asignado.');
+    }
+
     // Sincronizar primero enrolamientos locales pendientes
     await sincronizarEnrolamientosPendientes();
 
@@ -30,6 +39,24 @@ class SyncService {
       }
     } catch (e) {
       print('[Sync] Advertencia al sincronizar horarios: $e');
+    }
+
+    print('[Sync] Iniciando descarga de tipos de ausencia desde SQL Server...');
+    try {
+      final remoteAbsenceTypes = await _sqlServer.obtenerTiposAusenciaServidor();
+      print('[Sync] Descargados ${remoteAbsenceTypes.length} tipos de ausencia.');
+      for (final t in remoteAbsenceTypes) {
+        final String? sigla = t['sigla']?.toString().trim();
+        final String? nombre = t['nombre']?.toString().trim();
+        if (sigla != null && sigla.isNotEmpty && nombre != null && nombre.isNotEmpty) {
+          await _database.saveAbsenceType({
+            'sigla': sigla,
+            'nombre': nombre,
+          });
+        }
+      }
+    } catch (e) {
+      print('[Sync] Advertencia al sincronizar tipos de ausencia: $e');
     }
 
     print('[Sync] Iniciando descarga de empleados desde SQL Server...');
@@ -138,6 +165,12 @@ class SyncService {
         }
       }
     }
+
+    // Sincronizar ausencias locales hacia el servidor
+    await sincronizarAusenciasPendientes();
+
+    // Autogenerar novedades de LLT y SC en el servidor central
+    await autogenerarNovedadesCentral();
 
     // Sincronizar asistencias del servidor al local (bidireccional)
     await descargarAsistenciasDesdeSqlServer();
@@ -276,6 +309,7 @@ class SyncService {
         duracion: duracion,
         tipo: tipo,
         unidadNegocio: departamento,
+        metodoRegistro: record['metodo_registro']?.toString() ?? 'FACIAL',
       );
 
       if (success) {
@@ -321,6 +355,7 @@ class SyncService {
       duracion: duracion,
       tipo: tipo,
       unidadNegocio: departamento,
+      metodoRegistro: record['metodo_registro']?.toString() ?? 'FACIAL',
     );
 
     if (success) {
@@ -410,5 +445,130 @@ class SyncService {
     } catch (e) {
       print('[Sync] Error al descargar asistencias: $e');
     }
+  }
+
+  /// Sincroniza novedades de ausencias locales pendientes de subir al servidor
+  Future<Map<String, int>> sincronizarAusenciasPendientes() async {
+    final pendingAbsences = await _database.getPendingAbsences();
+    final int total = pendingAbsences.length;
+    int successCount = 0;
+    int failCount = 0;
+
+    if (total == 0) {
+      return {'total': 0, 'success': 0, 'failed': 0};
+    }
+
+    print('[Sync] Iniciando sincronización de $total ausencias/novedades pendientes...');
+
+    for (final absence in pendingAbsences) {
+      final int employeeId = absence['employee_id'] as int;
+      final String date = absence['date'].toString();
+      final String sigla = absence['sigla_ausencia'].toString();
+      final String? observacion = absence['observacion']?.toString();
+      final String? cedula = absence['employee_code']?.toString();
+
+      if (cedula == null || cedula.isEmpty) {
+        failCount++;
+        continue;
+      }
+
+      final success = await _sqlServer.guardarAusentismoServidor(
+        cedula: cedula,
+        fecha: date,
+        sigla: sigla,
+        observacion: observacion,
+      );
+
+      if (success) {
+        await _database.markAbsenceAsSynced(employeeId, date);
+        successCount++;
+        print('[Sync] Ausencia de $cedula en fecha $date subida con éxito.');
+      } else {
+        failCount++;
+        print('[Sync] Ausencia de $cedula en fecha $date falló al subirse.');
+      }
+    }
+
+    print('[Sync] Sincronización de ausencias finalizada: $successCount exitosas, $failCount fallidas.');
+    return {
+      'total': total,
+      'success': successCount,
+      'failed': failCount,
+    };
+  }
+
+  /// Dispara la autogeneración de LLT y SC en el servidor SQL Server central.
+  /// SC solo se ejecuta hoy si la hora actual es posterior o igual a las 16:00 (4:00 PM)
+  /// y además se valida que todos los demás tótems activos hayan sincronizado.
+  /// Para los dos días anteriores, se ejecuta sin restricciones de hora.
+  Future<void> autogenerarNovedadesCentral() async {
+    print('[Sync] Iniciando proceso automático de novedades (LLT y SC)...');
+    try {
+      final String? deviceId = await _database.getDeviceId();
+      if (deviceId == null || deviceId.isEmpty) {
+        print('[Sync] Omitiendo autogeneración: esta tablet no tiene un ID de dispositivo asignado (debe configurarse en ajustes).');
+        return;
+      }
+
+      // Asegurar que nuestro latido esté registrado antes de validar el de los demás
+      await _sqlServer.reportarSincronizacionTotem(deviceId);
+
+      // 1. Generar Llegadas Tardes (LLT)
+      await _sqlServer.autogenerarLltEnServidor();
+
+      // 2. Generar Faltas Sin Justa Causa (SC) para los últimos 3 días
+      final DateTime now = DateTime.now();
+      
+      // Hoy
+      final String hoyStr = now.toIso8601String().substring(0, 10);
+      if (now.hour >= 16) {
+        // VALIDACIÓN: Verificar si todas las tablets activas ya sincronizaron hoy después de las 4:00 PM
+        final bool todosSincronizados = await _sqlServer.validarSincronizacionTotalHoy();
+        if (todosSincronizados) {
+          await _sqlServer.autogenerarScEnServidor(hoyStr);
+        } else {
+          print('[Sync] Pospuesta la autogeneración de SC de hoy ($hoyStr): Hay tótems de otras sedes pendientes de sincronizar.');
+        }
+      } else {
+        print('[Sync] Omitiendo SC para hoy ($hoyStr) por no ser aún las 4:00 PM.');
+      }
+
+      // Ayer
+      final String ayerStr = now.subtract(const Duration(days: 1)).toIso8601String().substring(0, 10);
+      await _sqlServer.autogenerarScEnServidor(ayerStr);
+
+      // Anteayer
+      final String anteayerStr = now.subtract(const Duration(days: 2)).toIso8601String().substring(0, 10);
+      await _sqlServer.autogenerarScEnServidor(anteayerStr);
+
+      print('[Sync] Proceso automático de novedades finalizado.');
+    } catch (e) {
+      print('[Sync] Error al autogenerar novedades: $e');
+    }
+  }
+
+  static Timer? _diarioScTimer;
+
+  /// Programa un temporizador automático para que se ejecute todos los días exactamente a las 4:00 PM
+  void iniciarTemporizadorDiarioSc() {
+    _diarioScTimer?.cancel();
+
+    final DateTime now = DateTime.now();
+    DateTime target = DateTime(now.year, now.month, now.day, 16, 0, 0); // 4:00 PM hoy
+
+    if (now.isAfter(target)) {
+      // Si ya pasó de las 4:00 PM hoy, programar para mañana a las 4:00 PM
+      target = target.add(const Duration(days: 1));
+    }
+
+    final Duration duration = target.difference(now);
+    print('[Sync] Programando autogeneración de novedades diarias para las 16:00 (dentro de ${duration.inHours} horas, ${duration.inMinutes % 60} minutos)...');
+
+    _diarioScTimer = Timer(duration, () async {
+      print('[Sync] Temporizador diario activado. Iniciando sincronización completa...');
+      await sincronizarDesdeSqlServer();
+      // Reprogramar para el siguiente día
+      iniciarTemporizadorDiarioSc();
+    });
   }
 }

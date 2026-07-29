@@ -1,9 +1,14 @@
 import 'package:flutter/material.dart';
 import 'screens/home_screen.dart';
 import 'theme/app_colors.dart';
+import 'services/sync_service.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  
+  // Iniciar temporizador automático para autogenerar faltas a las 4:00 PM
+  SyncService().iniciarTemporizadorDiarioSc();
+  
   runApp(const FacialAttendanceApp());
 }
 
