@@ -67,7 +67,11 @@ class SyncService {
       final String? cedula = row['cedula']?.toString().trim();
       final String? nombre = row['nombre']?.toString().trim();
       final String? estado = row['estado']?.toString().trim();
-      final String? departamento = row['id_seccion']?.toString().trim() ?? row['tipo']?.toString().trim();
+      final String? nombreSeccion = row['nombre_seccion']?.toString().trim();
+      final String? idSeccion = row['id_seccion']?.toString().trim();
+      final String departamento = (nombreSeccion != null && nombreSeccion.isNotEmpty)
+          ? nombreSeccion
+          : ((idSeccion != null && idSeccion.isNotEmpty) ? idSeccion : 'ADMINISTRATIVO');
       final String? horarioId = row['horario_id']?.toString().trim();
       final String part1 = row['vec_part1']?.toString() ?? '';
       final String part2 = row['vec_part2']?.toString() ?? '';
@@ -110,6 +114,8 @@ class SyncService {
         }
       }
 
+      final String? idEmpresa = row['id_empresa']?.toString().trim();
+
       // Insertar o actualizar el empleado en SQLite local
       final employee = Employee(
         name: nombre,
@@ -118,6 +124,7 @@ class SyncService {
         horarioId: horarioId != null && horarioId.isNotEmpty ? horarioId : null,
         createdAt: DateTime.now(),
         isSynced: isSynced,
+        idEmpresa: idEmpresa != null && idEmpresa.isNotEmpty ? idEmpresa : null,
       );
 
       final employeeId = await _insertOrUpdateEmployee(employee);
@@ -175,7 +182,110 @@ class SyncService {
     // Sincronizar asistencias del servidor al local (bidireccional)
     await descargarAsistenciasDesdeSqlServer();
 
+    // Sincronizar programaciones especiales (bidireccional)
+    await sincronizarProgramacionesEspeciales();
+
     print('[Sync] Sincronización completada con éxito.');
+  }
+
+  /// Sincroniza programaciones especiales (sube pendientes y descarga desde SQL Server)
+  Future<void> sincronizarProgramacionesEspeciales() async {
+    print('[Sync] Iniciando sincronización de programaciones especiales...');
+    final deviceId = await _database.getDeviceId();
+
+    // 1. Subir programaciones locales pendientes en lote
+    try {
+      final pending = await _database.getPendingSpecialSchedules();
+      print('[Sync] Programaciones especiales pendientes por subir: ${pending.length}');
+
+      if (pending.isNotEmpty) {
+        final List<Map<String, dynamic>> itemsToUpload = [];
+        final List<int> pendingIds = [];
+
+        for (final p in pending) {
+          final int id = p['id'] as int;
+          final String? cedula = p['employee_code']?.toString();
+          final String? date = p['date']?.toString();
+          if (cedula != null && date != null) {
+            pendingIds.add(id);
+            itemsToUpload.add({
+              'cedula': cedula,
+              'fecha': date,
+              'horaInicio': p['hora_inicio']?.toString(),
+              'horaFinal': p['hora_final']?.toString(),
+              'observacion': p['observacion']?.toString(),
+              'dispositivoId': deviceId,
+            });
+          }
+        }
+
+        if (itemsToUpload.isNotEmpty) {
+          final success = await _sqlServer.guardarProgramacionesEspecialesLoteServidor(itemsToUpload);
+          if (success) {
+            for (final id in pendingIds) {
+              await _database.markSpecialScheduleAsSynced(id);
+            }
+          }
+        }
+      }
+    } catch (e) {
+      print('[Sync] Error al subir programaciones especiales en lote: $e');
+    }
+
+    // 2. Descargar programaciones especiales desde el servidor
+    try {
+      final remoteList = await _sqlServer.obtenerProgramacionesEspecialesServidor();
+      print('[Sync] Descargadas ${remoteList.length} programaciones especiales del servidor.');
+      for (final r in remoteList) {
+        await _database.upsertSpecialScheduleFromServer(r);
+      }
+    } catch (e) {
+      print('[Sync] Error al descargar programaciones especiales: $e');
+    }
+  }
+
+  /// Elimina una programación especial por ID
+  Future<void> eliminarProgramacionEspecial(int id) async {
+    await eliminarProgramacionesEspeciales([id]);
+  }
+
+  /// Elimina múltiples programaciones especiales en lote (local y remotamente en una sola consulta)
+  Future<void> eliminarProgramacionesEspeciales(List<int> ids) async {
+    if (ids.isEmpty) return;
+
+    try {
+      final db = await _database.database;
+      final placeholders = List.filled(ids.length, '?').join(',');
+
+      // 1. Obtener pares (cedula, fecha) antes de borrar localmente
+      final rows = await db.rawQuery('''
+        SELECT s.id, s.date, e.employee_code
+        FROM special_schedules s
+        INNER JOIN employees e ON s.employee_id = e.id
+        WHERE s.id IN ($placeholders)
+      ''', ids);
+
+      final List<Map<String, String>> itemsToDelete = [];
+      for (final r in rows) {
+        final dateStr = r['date']?.toString();
+        final cedula = r['employee_code']?.toString();
+        if (dateStr != null && cedula != null) {
+          itemsToDelete.add({'cedula': cedula, 'fecha': dateStr});
+        }
+      }
+
+      // 2. Eliminar de SQLite local
+      for (final id in ids) {
+        await _database.deleteSpecialSchedule(id);
+      }
+
+      // 3. Eliminar de SQL Server central en una sola consulta
+      if (itemsToDelete.isNotEmpty) {
+        await _sqlServer.eliminarProgramacionesEspecialesServidor(itemsToDelete);
+      }
+    } catch (e) {
+      print('[Sync] Error al eliminar programaciones especiales en lote: $e');
+    }
   }
 
   /// Sincroniza los enrolamientos locales pendientes (is_synced = 0) hacia SQL Server
@@ -310,6 +420,7 @@ class SyncService {
         tipo: tipo,
         unidadNegocio: departamento,
         metodoRegistro: record['metodo_registro']?.toString() ?? 'FACIAL',
+        idDispositivo: record['dispositivo_id']?.toString(),
       );
 
       if (success) {
@@ -356,6 +467,7 @@ class SyncService {
       tipo: tipo,
       unidadNegocio: departamento,
       metodoRegistro: record['metodo_registro']?.toString() ?? 'FACIAL',
+      idDispositivo: record['dispositivo_id']?.toString(),
     );
 
     if (success) {
@@ -477,6 +589,7 @@ class SyncService {
         fecha: date,
         sigla: sigla,
         observacion: observacion,
+        idDispositivo: absence['dispositivo_id']?.toString(),
       );
 
       if (success) {

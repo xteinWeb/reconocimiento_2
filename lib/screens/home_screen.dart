@@ -3,6 +3,7 @@ import 'attendance_screen.dart';
 import 'attendance_list_screen.dart';
 import 'employee_list_screen.dart';
 import 'absence_screen.dart';
+import 'special_schedule_screen.dart';
 import 'sync_status_screen.dart';
 import 'device_config_screen.dart';
 import '../services/sync_service.dart';
@@ -186,6 +187,20 @@ class _HomeScreenState extends State<HomeScreen> {
                   onPressed: () => Navigator.push(
                     context,
                     MaterialPageRoute(builder: (_) => const AbsenceScreen()),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                _buildOptionCard(
+                  context,
+                  icon: Icons.event_available_rounded,
+                  title: 'Programación Especial',
+                  subtitle: 'Asignar turnos dominicales u horarios especiales',
+                  color: AppColors.kioskAccent,
+                  onPressed: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => const SpecialScheduleScreen(),
+                    ),
                   ),
                 ),
                 const SizedBox(height: 16),

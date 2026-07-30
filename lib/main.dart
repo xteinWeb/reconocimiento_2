@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
+import 'package:intl/date_symbol_data_local.dart';
 import 'screens/home_screen.dart';
 import 'theme/app_colors.dart';
 import 'services/sync_service.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  
+  await initializeDateFormatting('es', null);
   
   // Iniciar temporizador automático para autogenerar faltas a las 4:00 PM
   SyncService().iniciarTemporizadorDiarioSc();

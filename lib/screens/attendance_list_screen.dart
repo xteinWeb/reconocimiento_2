@@ -1,7 +1,10 @@
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:intl/intl.dart';
+import 'package:excel/excel.dart' as excel_pkg;
+import 'package:file_picker/file_picker.dart';
 import '../services/database_service.dart';
 import '../models/employee.dart';
 import '../theme/app_colors.dart';
@@ -47,8 +50,15 @@ class _AttendanceListScreenState extends State<AttendanceListScreen> {
     setState(() => _isLoading = true);
     try {
       List<Map<String, dynamic>> records;
+      List<Map<String, dynamic>> absences;
+
       if (_selectedEmployeeFilter != null) {
         records = await _database.getAttendanceByEmployeeAndDateRange(
+          _selectedEmployeeFilter!.id!,
+          _selectedDateRange.start,
+          _selectedDateRange.end,
+        );
+        absences = await _database.getAbsencesByEmployeeAndDateRange(
           _selectedEmployeeFilter!.id!,
           _selectedDateRange.start,
           _selectedDateRange.end,
@@ -58,13 +68,47 @@ class _AttendanceListScreenState extends State<AttendanceListScreen> {
           _selectedDateRange.start,
           _selectedDateRange.end,
         );
+        absences = await _database.getAbsencesByDateRange(
+          _selectedDateRange.start,
+          _selectedDateRange.end,
+        );
       }
+
+      final mappedAbsences = absences.map((a) {
+        final dateStr = a['date'] as String;
+        final timestampStr = '${dateStr} 00:00:00';
+        return {
+          'id': null,
+          'employee_id': a['employee_id'],
+          'employee_name': a['employee_name'],
+          'employee_code': a['employee_code'],
+          'employee_department': a['employee_department'] ?? '',
+          'timestamp': timestampStr,
+          'evento': 'NOVEDAD (${a['sigla_ausencia']})',
+          'tipo': 'NOVEDAD',
+          'duracion': a['observacion'] ?? a['absence_name'] ?? 'Ausencia registrada',
+          'confidence': 0.0,
+          'dispositivo_id': a['dispositivo_id'] ?? 'SISTEMA',
+          'id_empresa': a['id_empresa'],
+        };
+      }).toList();
+
+      final List<Map<String, dynamic>> combined = [
+        ...records,
+        ...mappedAbsences,
+      ];
+
+      combined.sort((a, b) {
+        final timeA = DateTime.tryParse(a['timestamp'] as String) ?? DateTime.now();
+        final timeB = DateTime.tryParse(b['timestamp'] as String) ?? DateTime.now();
+        return timeA.compareTo(timeB);
+      });
 
       int entradasNormal = 0;
       int retardos = 0;
       int salidas = 0;
 
-      for (final r in records) {
+      for (final r in combined) {
         final String evento = r['evento'] ?? 'ENTRADA';
         final String tipo = r['tipo'] ?? 'NORMAL';
         if (evento == 'ENTRADA') {
@@ -79,13 +123,13 @@ class _AttendanceListScreenState extends State<AttendanceListScreen> {
       }
 
       setState(() {
-        _records = records;
+        _records = combined;
         _totalEntradasNormal = entradasNormal;
         _totalRetardos = retardos;
         _totalSalidas = salidas;
       });
     } catch (e) {
-      print('Error al cargar marcaciones: $e');
+      print('Error al cargar marcaciones y ausencias: $e');
     } finally {
       setState(() => _isLoading = false);
     }
@@ -134,8 +178,26 @@ class _AttendanceListScreenState extends State<AttendanceListScreen> {
     return "${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}";
   }
 
-  // Exportar registros a CSV
-  Future<void> _exportToCSV() async {
+  excel_pkg.CellValue _toCellValue(dynamic val) {
+    if (val == null) return excel_pkg.TextCellValue('');
+    if (val is int) return excel_pkg.IntCellValue(val);
+    if (val is double) return excel_pkg.DoubleCellValue(val);
+    if (val is bool) return excel_pkg.BoolCellValue(val);
+    if (val is DateTime) {
+      return excel_pkg.DateTimeCellValue(
+        year: val.year,
+        month: val.month,
+        day: val.day,
+        hour: val.hour,
+        minute: val.minute,
+        second: val.second,
+      );
+    }
+    return excel_pkg.TextCellValue(val.toString());
+  }
+
+  // Exportar registros a Excel (.xlsx) y permitir guardar mediante selector de archivos
+  Future<void> _exportToExcel() async {
     if (_records.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -146,52 +208,107 @@ class _AttendanceListScreenState extends State<AttendanceListScreen> {
       return;
     }
 
-    try {
-      final buffer = StringBuffer();
-      // Cabecera CSV
-      buffer.writeln('ID Registro,ID Colaborador,Nombre,Código,Departamento,Fecha/Hora,Evento,Tipo,Duración Retardo,Confianza');
+    setState(() => _isLoading = true);
 
+    try {
+      // 1. Crear el libro de Excel
+      final excel = excel_pkg.Excel.createExcel();
+      
+      // La hoja por defecto suele llamarse "Sheet1"
+      final String sheetName = excel.getDefaultSheet() ?? 'Sheet1';
+      final sheet = excel[sheetName];
+
+      // 2. Definir cabeceras
+      final headers = [
+        'Nombre',
+        'Cédula',
+        'Departamento',
+        'Empresa',
+        'Fecha/Hora',
+        'Evento',
+        'Tipo',
+        'Duración Retardo',
+        'Tótem (Dispositivo)'
+      ];
+
+      sheet.appendRow(headers.map((h) => _toCellValue(h)).toList());
+
+      // 3. Agregar los datos
       for (final r in _records) {
         final timestamp = DateTime.parse(r['timestamp'] as String);
         final formattedDate = DateFormat('yyyy-MM-dd HH:mm:ss').format(timestamp);
-        buffer.writeln(
-          '${r['id']},${r['employee_id']},"${r['employee_name']}","${r['employee_code']}","${r['employee_department'] ?? ''}","$formattedDate","${r['evento'] ?? 'ENTRADA'}","${r['tipo'] ?? 'NORMAL'}","${r['duracion'] ?? ''}",${r['confidence']}',
-        );
+        
+        final row = [
+          r['employee_name'],
+          r['employee_code'],
+          r['employee_department'] ?? '',
+          r['id_empresa'] ?? '',
+          formattedDate,
+          r['evento'] ?? 'ENTRADA',
+          r['tipo'] ?? 'NORMAL',
+          r['duracion'] ?? '',
+          r['dispositivo_id'] ?? ''
+        ];
+        sheet.appendRow(row.map((val) => _toCellValue(val)).toList());
       }
 
-      final directory = await getApplicationDocumentsDirectory();
+      // 4. Codificar a bytes
+      final fileBytes = excel.encode();
+      if (fileBytes == null) {
+        throw Exception('No se pudo generar el archivo Excel.');
+      }
+
+      // 5. Abrir el selector de archivos para guardar
       final startStr = DateFormat('yyyyMMdd').format(_selectedDateRange.start);
       final endStr = DateFormat('yyyyMMdd').format(_selectedDateRange.end);
-      final filePath = '${directory.path}/Reporte_Asistencia_${startStr}_$endStr.csv';
-      final file = File(filePath);
-      await file.writeAsString(buffer.toString());
+      final defaultFileName = 'Reporte_Asistencia_${startStr}_$endStr.xlsx';
 
-      if (mounted) {
-        showDialog(
-          context: context,
-          builder: (context) => AlertDialog(
-            backgroundColor: const Color(0xFF2B3A24),
-            title: const Text('Exportación Exitosa', style: TextStyle(color: Colors.white)),
-            content: Text(
-              'El reporte se guardó correctamente en:\n\n$filePath',
-              style: const TextStyle(color: Colors.white70),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('Entendido', style: TextStyle(color: Colors.amber)),
+      final String? outputFile = await FilePicker.platform.saveFile(
+        dialogTitle: 'Guardar Reporte de Asistencia',
+        fileName: defaultFileName,
+        type: FileType.custom,
+        allowedExtensions: ['xlsx'],
+        bytes: Uint8List.fromList(fileBytes),
+      );
+
+      setState(() => _isLoading = false);
+
+      if (outputFile != null) {
+        final file = File(outputFile);
+        if (!await file.exists()) {
+          await file.writeAsBytes(fileBytes);
+        }
+
+        if (mounted) {
+          showDialog(
+            context: context,
+            builder: (context) => AlertDialog(
+              backgroundColor: const Color(0xFF2B3A24),
+              title: const Text('Exportación Exitosa', style: TextStyle(color: Colors.white)),
+              content: Text(
+                'El reporte se guardó correctamente en:\n\n$outputFile',
+                style: const TextStyle(color: Colors.white70),
               ),
-            ],
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Entendido', style: TextStyle(color: Colors.amber)),
+                ),
+              ],
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      setState(() => _isLoading = false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error al exportar: $e'),
+            backgroundColor: AppColors.error,
           ),
         );
       }
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error al exportar: $e'),
-          backgroundColor: AppColors.error,
-        ),
-      );
     }
   }
 
@@ -212,8 +329,8 @@ class _AttendanceListScreenState extends State<AttendanceListScreen> {
         actions: [
           IconButton(
             icon: const Icon(Icons.file_download_rounded, color: AppColors.primary),
-            tooltip: 'Exportar CSV',
-            onPressed: _exportToCSV,
+            tooltip: 'Exportar Excel',
+            onPressed: _exportToExcel,
           ),
         ],
       ),
@@ -361,7 +478,7 @@ class _AttendanceListScreenState extends State<AttendanceListScreen> {
                           final String evento = r['evento'] ?? 'ENTRADA';
                           final String tipo = r['tipo'] ?? 'NORMAL';
                           final String? duracion = r['duracion'];
-
+                          final isNovedad = tipo == 'NOVEDAD';
                           final isEntrada = evento == 'ENTRADA';
                           final isRetardo = tipo == 'RETARDO';
 
@@ -377,12 +494,18 @@ class _AttendanceListScreenState extends State<AttendanceListScreen> {
                             ),
                             child: ListTile(
                               leading: CircleAvatar(
-                                backgroundColor: isEntrada
-                                    ? Colors.teal.withOpacity(0.15)
-                                    : Colors.blueAccent.withOpacity(0.15),
+                                backgroundColor: isNovedad
+                                    ? Colors.orange.withOpacity(0.15)
+                                    : (isEntrada
+                                        ? Colors.teal.withOpacity(0.15)
+                                        : Colors.blueAccent.withOpacity(0.15)),
                                 child: Icon(
-                                  isEntrada ? Icons.login_rounded : Icons.logout_rounded,
-                                  color: isEntrada ? Colors.teal : Colors.blueAccent,
+                                  isNovedad
+                                      ? Icons.warning_amber_rounded
+                                      : (isEntrada ? Icons.login_rounded : Icons.logout_rounded),
+                                  color: isNovedad
+                                      ? Colors.orange
+                                      : (isEntrada ? Colors.teal : Colors.blueAccent),
                                 ),
                               ),
                               title: Text(
@@ -397,7 +520,7 @@ class _AttendanceListScreenState extends State<AttendanceListScreen> {
                                 children: [
                                   const SizedBox(height: 4),
                                   Text(
-                                    'Código: ${r['employee_code'] ?? ''} • Depto: ${r['employee_department'] ?? 'S/D'}',
+                                    'Cédula: ${r['employee_code'] ?? ''} • Depto: ${r['employee_department'] ?? 'S/D'}',
                                     style: TextStyle(
                                       color: isDark ? Colors.white54 : AppColors.textSecondary,
                                       fontSize: 12,
@@ -405,7 +528,7 @@ class _AttendanceListScreenState extends State<AttendanceListScreen> {
                                   ),
                                   const SizedBox(height: 2),
                                   Text(
-                                    '$formattedDate - $formattedTime',
+                                    isNovedad ? formattedDate : '$formattedDate - $formattedTime',
                                     style: TextStyle(
                                       color: isDark ? Colors.white38 : AppColors.textSecondary.withOpacity(0.7),
                                       fontSize: 11,
@@ -417,29 +540,45 @@ class _AttendanceListScreenState extends State<AttendanceListScreen> {
                                 mainAxisAlignment: MainAxisAlignment.center,
                                 crossAxisAlignment: CrossAxisAlignment.end,
                                 children: [
-                                  // Tipo badge (NORMAL, RETARDO)
+                                  // Tipo badge (NORMAL, RETARDO, SALIDA, NOVEDAD)
                                   Container(
                                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                                     decoration: BoxDecoration(
-                                      color: isRetardo
-                                          ? Colors.amber.withOpacity(0.15)
-                                          : (isEntrada
-                                              ? Colors.teal.withOpacity(0.15)
-                                              : Colors.blueAccent.withOpacity(0.15)),
+                                      color: isNovedad
+                                          ? Colors.orange.withOpacity(0.15)
+                                          : (isRetardo
+                                              ? Colors.amber.withOpacity(0.15)
+                                              : (isEntrada
+                                                  ? Colors.teal.withOpacity(0.15)
+                                                  : Colors.blueAccent.withOpacity(0.15))),
                                       borderRadius: BorderRadius.circular(6),
                                     ),
                                     child: Text(
-                                      isRetardo ? 'RETARDO' : (isEntrada ? 'NORMAL' : 'SALIDA'),
+                                      isNovedad
+                                          ? evento
+                                          : (isRetardo ? 'RETARDO' : (isEntrada ? 'NORMAL' : 'SALIDA')),
                                       style: TextStyle(
-                                        color: isRetardo
-                                            ? Colors.amber.shade400
-                                            : (isEntrada ? Colors.tealAccent : Colors.blue.shade300),
+                                        color: isNovedad
+                                            ? Colors.orangeAccent
+                                            : (isRetardo
+                                                ? Colors.amber.shade400
+                                                : (isEntrada ? Colors.tealAccent : Colors.blue.shade300)),
                                         fontSize: 10,
                                         fontWeight: FontWeight.bold,
                                       ),
                                     ),
                                   ),
-                                  if (isRetardo && duracion != null) ...[
+                                  if (isNovedad && duracion != null) ...[
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      duracion,
+                                      style: const TextStyle(
+                                        color: Colors.orange,
+                                        fontSize: 9,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ] else if (isRetardo && duracion != null) ...[
                                     const SizedBox(height: 4),
                                     Text(
                                       duracion,

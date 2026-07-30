@@ -53,30 +53,106 @@ class SqlServerService {
     }
 
     try {
+      // 0. Asegurar existencia de la columna 'nombre_seccion' en 'empleados_asistencia'
+      await SqlConn.write(connectionId, """
+        IF NOT EXISTS (
+            SELECT * FROM INFORMATION_SCHEMA.COLUMNS 
+            WHERE TABLE_NAME = 'empleados_asistencia' AND COLUMN_NAME = 'nombre_seccion'
+        )
+        BEGIN
+          ALTER TABLE empleados_asistencia ADD nombre_seccion VARCHAR(200) NULL;
+        END
+      """);
+
       // 1. Sincronizar estados inactivos desde 'empleados' (ERP) a 'empleados_asistencia'
       print('[SqlServer] Ejecutando sincronización de Inactivos...');
       await SqlConn.write(connectionId, """
         UPDATE ea
-        SET ea.estado = 'INACTIVO'
+        SET ea.estado = 'INACTIVO', ea.id_empresa = emp.ID_EMPRESA
         FROM empleados_asistencia ea
-        INNER JOIN empleados emp ON ea.cedula = emp.ID_EMPLEADO
-        WHERE emp.ESTADO = 'INACTIVO' AND ea.estado <> 'INACTIVO'
+        INNER JOIN empleados emp ON LTRIM(RTRIM(ea.cedula)) = LTRIM(RTRIM(emp.ID_EMPLEADO))
+        WHERE emp.ESTADO = 'INACTIVO' AND (ea.estado <> 'INACTIVO' OR ea.id_empresa IS NULL OR ea.id_empresa <> emp.ID_EMPRESA)
       """);
 
       // 2. Sincronizar estados activos desde 'empleados' (ERP) a 'empleados_asistencia'
       print('[SqlServer] Ejecutando sincronización de Activos...');
       await SqlConn.write(connectionId, """
         UPDATE ea
-        SET ea.estado = 'ACTIVO'
+        SET ea.estado = 'ACTIVO', ea.id_empresa = emp.ID_EMPRESA
         FROM empleados_asistencia ea
-        INNER JOIN empleados emp ON ea.cedula = emp.ID_EMPLEADO
-        WHERE emp.ESTADO = 'ACTIVO' AND ea.estado <> 'ACTIVO'
+        INNER JOIN empleados emp ON LTRIM(RTRIM(ea.cedula)) = LTRIM(RTRIM(emp.ID_EMPLEADO))
+        WHERE emp.ESTADO = 'ACTIVO' AND (ea.estado <> 'ACTIVO' OR ea.id_empresa IS NULL OR ea.id_empresa <> emp.ID_EMPRESA)
+      """);
+
+      // También actualizamos la empresa en empleados activos que ya existen por si acaso cambió
+      await SqlConn.write(connectionId, """
+        UPDATE ea
+        SET ea.id_empresa = emp.ID_EMPRESA
+        FROM empleados_asistencia ea
+        INNER JOIN empleados emp ON LTRIM(RTRIM(ea.cedula)) = LTRIM(RTRIM(emp.ID_EMPLEADO))
+        WHERE ea.id_empresa IS NULL OR ea.id_empresa <> emp.ID_EMPRESA
+      """);
+
+      // Actualizar 'id_seccion', 'sede_principal' y 'tipo' en 'empleados_asistencia' desde ERP
+      print('[SqlServer] Actualizando id_seccion, sede_principal y tipo en empleados_asistencia...');
+      await SqlConn.write(connectionId, """
+        UPDATE ea
+        SET 
+            ea.id_seccion = ies.ID_SECCION,
+            ea.sede_principal = COALESCE(emp.ID_UN_ITEM, ea.sede_principal),
+            ea.tipo = COALESCE(ies.ID_ACTIVIDAD, ea.tipo)
+        FROM empleados_asistencia ea
+        INNER JOIN empleados emp ON LTRIM(RTRIM(ea.cedula)) = LTRIM(RTRIM(emp.ID_EMPLEADO))
+        LEFT JOIN (
+            SELECT LTRIM(RTRIM(ID_EMPLEADO)) AS ID_EMPLEADO, ID_UN, MAX(ID_SECCION) AS ID_SECCION, MAX(ID_ACTIVIDAD) AS ID_ACTIVIDAD
+            FROM itm_empleados_Secciones
+            WHERE TIPO = 'PRINCIPAL'
+            GROUP BY LTRIM(RTRIM(ID_EMPLEADO)), ID_UN
+        ) ies ON LTRIM(RTRIM(ea.cedula)) = ies.ID_EMPLEADO AND COALESCE(emp.ID_UN, '00') = ies.ID_UN
+        WHERE (ea.id_seccion IS NULL OR ea.id_seccion <> ies.ID_SECCION
+            OR ea.sede_principal IS NULL OR ea.sede_principal <> emp.ID_UN_ITEM
+            OR ea.tipo IS NULL OR ea.tipo <> ies.ID_ACTIVIDAD)
+      """);
+
+      // Actualizar 'nombre_seccion' en 'empleados_asistencia' cruzando con la tabla 'secciones'
+      print('[SqlServer] Actualizando nombres de secciones...');
+      await SqlConn.write(connectionId, """
+        UPDATE ea
+        SET ea.nombre_seccion = LTRIM(RTRIM(sec.DESCRIPCION))
+        FROM empleados_asistencia ea
+        INNER JOIN (
+            SELECT LTRIM(RTRIM(ID_EMPLEADO)) AS ID_EMPLEADO, ID_UN, MAX(ID_SECCION) AS ID_SECCION
+            FROM itm_empleados_Secciones
+            WHERE TIPO = 'PRINCIPAL'
+            GROUP BY LTRIM(RTRIM(ID_EMPLEADO)), ID_UN
+        ) ies ON LTRIM(RTRIM(ea.cedula)) = ies.ID_EMPLEADO
+        INNER JOIN secciones sec ON LTRIM(RTRIM(ies.ID_SECCION)) = LTRIM(RTRIM(sec.ID_SECCION)) AND (sec.ID_UN = ies.ID_UN OR sec.ID_UN = '00')
+        WHERE ea.nombre_seccion IS NULL OR ea.nombre_seccion <> LTRIM(RTRIM(sec.DESCRIPCION))
+      """);
+
+      await SqlConn.write(connectionId, """
+        UPDATE ea
+        SET ea.nombre_seccion = LTRIM(RTRIM(sec.DESCRIPCION))
+        FROM empleados_asistencia ea
+        INNER JOIN secciones sec ON LTRIM(RTRIM(ea.id_seccion)) = LTRIM(RTRIM(sec.ID_SECCION)) AND (sec.ID_UN = ea.sede_principal OR sec.ID_UN = '00')
+        WHERE (ea.nombre_seccion IS NULL OR ea.nombre_seccion <> LTRIM(RTRIM(sec.DESCRIPCION))) AND ea.id_seccion IS NOT NULL
+      """);
+
+      // Llenar con 'ADMINISTRATIVO' los registros con id_seccion o nombre_seccion nulos o vacíos
+      print('[SqlServer] Asignando ADMINISTRATIVO a secciones nulas...');
+      await SqlConn.write(connectionId, """
+        UPDATE empleados_asistencia
+        SET 
+            id_seccion = COALESCE(NULLIF(LTRIM(RTRIM(id_seccion)), ''), 'ADMINISTRATIVO'),
+            nombre_seccion = COALESCE(NULLIF(LTRIM(RTRIM(nombre_seccion)), ''), 'ADMINISTRATIVO')
+        WHERE id_seccion IS NULL OR LTRIM(RTRIM(id_seccion)) = ''
+           OR nombre_seccion IS NULL OR LTRIM(RTRIM(nombre_seccion)) = ''
       """);
 
       // 3. Insertar nuevos empleados activos en 'empleados_asistencia'
       print('[SqlServer] Insertando nuevos empleados...');
       await SqlConn.write(connectionId, """
-        INSERT INTO empleados_asistencia (cedula, nombre, estado, fecha_creacion)
+        INSERT INTO empleados_asistencia (cedula, nombre, estado, fecha_creacion, id_empresa, id_seccion, nombre_seccion, sede_principal, tipo)
         SELECT 
             emp.ID_EMPLEADO,
             LTRIM(RTRIM(
@@ -86,9 +162,21 @@ class SqlServerService {
                 COALESCE(il.APELLIDO2, '')
             )),
             'ACTIVO',
-            GETDATE()
+            GETDATE(),
+            emp.ID_EMPRESA,
+            COALESCE(NULLIF(LTRIM(RTRIM(ies.ID_SECCION)), ''), 'ADMINISTRATIVO'),
+            COALESCE(NULLIF(LTRIM(RTRIM(sec.DESCRIPCION)), ''), 'ADMINISTRATIVO'),
+            emp.ID_UN_ITEM,
+            ies.ID_ACTIVIDAD
         FROM empleados emp
         INNER JOIN IDENTIFICACIONES_LEGALES il ON emp.ID_LEGAL = il.ID_LEGAL
+        LEFT JOIN (
+            SELECT LTRIM(RTRIM(ID_EMPLEADO)) AS ID_EMPLEADO, ID_UN, MAX(ID_SECCION) AS ID_SECCION, MAX(ID_ACTIVIDAD) AS ID_ACTIVIDAD
+            FROM itm_empleados_Secciones
+            WHERE TIPO = 'PRINCIPAL'
+            GROUP BY LTRIM(RTRIM(ID_EMPLEADO)), ID_UN
+        ) ies ON LTRIM(RTRIM(emp.ID_EMPLEADO)) = ies.ID_EMPLEADO AND COALESCE(emp.ID_UN, '00') = ies.ID_UN
+        LEFT JOIN secciones sec ON LTRIM(RTRIM(ies.ID_SECCION)) = LTRIM(RTRIM(sec.ID_SECCION)) AND (sec.ID_UN = ies.ID_UN OR sec.ID_UN = '00')
         WHERE COALESCE(emp.ESTADO, 'ACTIVO') = 'ACTIVO'
           AND emp.ID_EMPLEADO NOT IN (SELECT cedula FROM empleados_asistencia)
       """);
@@ -116,9 +204,11 @@ class SqlServerService {
             COALESCE(ea.fecha_fin_contrato, '0') AS fecha_fin_contrato,
             COALESCE(emp.ESTADO, ea.estado, 'ACTIVO') AS estado,
             COALESCE(ea.sede_principal, emp.ID_UN_ITEM, '') AS sede_principal,
-            ies.ID_SECCION AS id_seccion,
+            COALESCE(NULLIF(LTRIM(RTRIM(ies.ID_SECCION)), ''), NULLIF(LTRIM(RTRIM(ea.id_seccion)), ''), 'ADMINISTRATIVO') AS id_seccion,
+            COALESCE(NULLIF(LTRIM(RTRIM(sec.DESCRIPCION)), ''), NULLIF(LTRIM(RTRIM(ea.nombre_seccion)), ''), 'ADMINISTRATIVO') AS nombre_seccion,
             COALESCE(ea.tipo, ies.ID_ACTIVIDAD, '') AS tipo,
-            ea.fecha_creacion AS fecha_registro
+            ea.fecha_creacion AS fecha_registro,
+            COALESCE(emp.ID_EMPRESA, ea.id_empresa, '') AS id_empresa
         FROM empleados emp
         FULL OUTER JOIN empleados_asistencia ea ON LTRIM(RTRIM(emp.ID_EMPLEADO)) = LTRIM(RTRIM(ea.cedula))
         LEFT JOIN IDENTIFICACIONES_LEGALES il ON (emp.ID_LEGAL = il.ID_LEGAL OR TRY_CAST(COALESCE(emp.ID_EMPLEADO, ea.cedula) AS FLOAT) = il.ID_LEGAL)
@@ -129,6 +219,7 @@ class SqlServerService {
             WHERE TIPO = 'PRINCIPAL'
             GROUP BY LTRIM(RTRIM(ID_EMPLEADO)), ID_UN
         ) ies ON COALESCE(LTRIM(RTRIM(emp.ID_EMPLEADO)), LTRIM(RTRIM(ea.cedula))) = ies.ID_EMPLEADO AND COALESCE(emp.ID_UN, '00') = ies.ID_UN
+        LEFT JOIN secciones sec ON LTRIM(RTRIM(ies.ID_SECCION)) = LTRIM(RTRIM(sec.ID_SECCION)) AND (sec.ID_UN = ies.ID_UN OR sec.ID_UN = '00')
         LEFT JOIN (
             SELECT t.ID_EMPLEADO, MAX(t.ID_HORARIO) AS ID_HORARIO
             FROM ITM_EMPLEADOS_TURNOS t
@@ -219,6 +310,7 @@ class SqlServerService {
     String tipo = 'NORMAL',
     String unidadNegocio = '',
     String metodoRegistro = 'FACIAL',
+    String? idDispositivo,
   }) async {
     final connected = await connect();
     if (!connected) return false;
@@ -234,6 +326,7 @@ class SqlServerService {
       final safeTipo = tipo.replaceAll("'", "''");
       final safeUnidadNegocio = unidadNegocio.replaceAll("'", "''");
       final safeMetodoRegistro = metodoRegistro.replaceAll("'", "''");
+      final safeIdDispositivo = idDispositivo != null ? "'${idDispositivo.replaceAll("'", "''")}'" : "NULL";
 
       final query =
           """
@@ -246,7 +339,8 @@ class SqlServerService {
           tipo, 
           unidad_negocio, 
           fecha_registro_servidor, 
-          metodo_registro
+          metodo_registro,
+          id_dispositivo
         )
         VALUES (
           CAST(NEWID() AS VARCHAR(36)),
@@ -257,7 +351,8 @@ class SqlServerService {
           '$safeTipo', 
           '$safeUnidadNegocio', 
           GETDATE(), 
-          '$safeMetodoRegistro'
+          '$safeMetodoRegistro',
+          $safeIdDispositivo
         );
       """;
 
@@ -364,6 +459,7 @@ class SqlServerService {
     required String fecha,
     required String sigla,
     String? observacion,
+    String? idDispositivo,
   }) async {
     final connected = await connect();
     if (!connected) {
@@ -372,15 +468,25 @@ class SqlServerService {
 
     try {
       print('[SqlServer] Registrando ausentismo para $cedula ($fecha - $sigla)...');
+      final safeIdDispositivo = idDispositivo != null ? "'${idDispositivo.replaceAll("'", "''")}'" : "NULL";
       final query = """
-        INSERT INTO ausentismos (id, cedula_empleado, fecha, sigla_ausencia, observacion, fecha_registro_servidor)
+        INSERT INTO ausentismos (
+          id, 
+          cedula_empleado, 
+          fecha, 
+          sigla_ausencia, 
+          observacion, 
+          fecha_registro_servidor,
+          id_dispositivo
+        )
         VALUES (
           CAST(NEWID() AS VARCHAR(36)),
           '${cedula.replaceAll("'", "''")}',
           '${fecha.replaceAll("'", "''")}',
           '${sigla.replaceAll("'", "''")}',
           ${observacion != null ? "'${observacion.replaceAll("'", "''")}'" : "NULL"},
-          GETDATE()
+          GETDATE(),
+          $safeIdDispositivo
         )
       """;
       await SqlConn.write(connectionId, query);
@@ -629,6 +735,204 @@ class SqlServerService {
       return true;
     } catch (e) {
       print('[SqlServer] Error al validar sincronización total de tótems: $e');
+      return false;
+    } finally {
+      await disconnect();
+    }
+  }
+
+  /// Asegura la existencia de la tabla programaciones_especiales en el servidor central
+  Future<void> asegurarTablaProgramacionesEspeciales() async {
+    final connected = await connect();
+    if (!connected) return;
+
+    try {
+      await SqlConn.write(connectionId, """
+        IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='programaciones_especiales' AND xtype='U')
+        BEGIN
+          CREATE TABLE programaciones_especiales (
+              id INT IDENTITY(1,1) PRIMARY KEY,
+              cedula VARCHAR(50) NOT NULL,
+              fecha VARCHAR(10) NOT NULL,
+              hora_inicio VARCHAR(10) NULL,
+              hora_final VARCHAR(10) NULL,
+              observacion NVARCHAR(255) NULL,
+              id_dispositivo VARCHAR(100) NULL,
+              fecha_creacion DATETIME DEFAULT GETDATE(),
+              CONSTRAINT UQ_cedula_fecha UNIQUE (cedula, fecha)
+          );
+        END
+      """);
+    } catch (e) {
+      print('[SqlServer] Error al asegurar tabla programaciones_especiales: $e');
+    } finally {
+      await disconnect();
+    }
+  }
+
+  /// Sube o actualiza una programación especial en SQL Server
+  Future<bool> guardarProgramacionEspecialServidor({
+    required String cedula,
+    required String fecha,
+    String? horaInicio,
+    String? horaFinal,
+    String? observacion,
+    String? dispositivoId,
+  }) async {
+    final connected = await connect();
+    if (!connected) return false;
+
+    try {
+      await asegurarTablaProgramacionesEspeciales();
+      await connect();
+
+      final hInicioVal = horaInicio != null && horaInicio.isNotEmpty ? "'$horaInicio'" : "NULL";
+      final hFinalVal = horaFinal != null && horaFinal.isNotEmpty ? "'$horaFinal'" : "NULL";
+      final obsVal = observacion != null && observacion.isNotEmpty ? "N'${observacion.replaceAll("'", "''")}'" : "NULL";
+      final devVal = dispositivoId != null && dispositivoId.isNotEmpty ? "'$dispositivoId'" : "NULL";
+
+      await SqlConn.write(connectionId, """
+        MERGE programaciones_especiales AS target
+        USING (SELECT '$cedula' AS cedula, '$fecha' AS fecha) AS source
+        ON (target.cedula = source.cedula AND target.fecha = source.fecha)
+        WHEN MATCHED THEN
+            UPDATE SET hora_inicio = $hInicioVal,
+                       hora_final = $hFinalVal,
+                       observacion = $obsVal,
+                       id_dispositivo = $devVal
+        WHEN NOT MATCHED THEN
+            INSERT (cedula, fecha, hora_inicio, hora_final, observacion, id_dispositivo)
+            VALUES ('$cedula', '$fecha', $hInicioVal, $hFinalVal, $obsVal, $devVal);
+      """);
+      return true;
+    } catch (e) {
+      print('[SqlServer] Error al guardar programación especial en el servidor: $e');
+      return false;
+    } finally {
+      await disconnect();
+    }
+  }
+
+  /// Sube o actualiza múltiples programaciones especiales en SQL Server en una sola consulta MERGE en lote
+  Future<bool> guardarProgramacionesEspecialesLoteServidor(
+    List<Map<String, dynamic>> items,
+  ) async {
+    if (items.isEmpty) return true;
+
+    final connected = await connect();
+    if (!connected) return false;
+
+    try {
+      await asegurarTablaProgramacionesEspeciales();
+      await connect();
+
+      final valueRows = items.map((p) {
+        final cedula = p['cedula']?.toString() ?? '';
+        final fecha = p['fecha']?.toString() ?? '';
+        final hStart = p['horaInicio']?.toString();
+        final hEnd = p['horaFinal']?.toString();
+        final obs = p['observacion']?.toString();
+        final devId = p['dispositivoId']?.toString();
+
+        final hInicioVal = hStart != null && hStart.isNotEmpty ? "'$hStart'" : "NULL";
+        final hFinalVal = hEnd != null && hEnd.isNotEmpty ? "'$hEnd'" : "NULL";
+        final obsVal = obs != null && obs.isNotEmpty ? "N'${obs.replaceAll("'", "''")}'" : "NULL";
+        final devVal = devId != null && devId.isNotEmpty ? "'$devId'" : "NULL";
+
+        return "('$cedula', '$fecha', $hInicioVal, $hFinalVal, $obsVal, $devVal)";
+      }).join(',\n');
+
+      await SqlConn.write(connectionId, """
+        MERGE programaciones_especiales AS target
+        USING (VALUES
+          $valueRows
+        ) AS source (cedula, fecha, hora_inicio, hora_final, observacion, id_dispositivo)
+        ON (target.cedula = source.cedula AND target.fecha = source.fecha)
+        WHEN MATCHED THEN
+            UPDATE SET hora_inicio = source.hora_inicio,
+                       hora_final = source.hora_final,
+                       observacion = source.observacion,
+                       id_dispositivo = source.id_dispositivo
+        WHEN NOT MATCHED THEN
+            INSERT (cedula, fecha, hora_inicio, hora_final, observacion, id_dispositivo)
+            VALUES (source.cedula, source.fecha, source.hora_inicio, source.hora_final, source.observacion, source.id_dispositivo);
+      """);
+      print('[SqlServer] Guardadas ${items.length} programaciones especiales en lote en el servidor.');
+      return true;
+    } catch (e) {
+      print('[SqlServer] Error al guardar programaciones especiales en lote: $e');
+      _isConnected = false;
+      return false;
+    } finally {
+      await disconnect();
+    }
+  }
+
+  /// Descarga programaciones especiales desde SQL Server
+  Future<List<Map<String, dynamic>>> obtenerProgramacionesEspecialesServidor() async {
+    final connected = await connect();
+    if (!connected) return [];
+
+    try {
+      await asegurarTablaProgramacionesEspeciales();
+      await connect();
+
+      final results = await SqlConn.read(connectionId, """
+        SELECT 
+          LTRIM(RTRIM(cedula)) AS cedula,
+          CONVERT(VARCHAR(10), fecha, 120) AS date,
+          hora_inicio,
+          hora_final,
+          observacion
+        FROM programaciones_especiales
+        WHERE fecha >= CONVERT(VARCHAR(10), DATEADD(day, -7, GETDATE()), 120)
+      """);
+
+      final List<Map<String, dynamic>> output = [];
+      for (final rawRow in results) {
+        final row = Map<String, dynamic>.from(rawRow);
+        output.add({
+          'cedula': row['cedula']?.toString().trim(),
+          'date': row['date']?.toString().trim(),
+          'hora_inicio': row['hora_inicio']?.toString().trim(),
+          'hora_final': row['hora_final']?.toString().trim(),
+          'observacion': row['observacion']?.toString().trim(),
+        });
+      }
+      return output;
+    } catch (e) {
+      print('[SqlServer] Error al obtener programaciones especiales del servidor: $e');
+      return [];
+    } finally {
+      await disconnect();
+    }
+  }
+
+  /// Elimina una o varias programaciones especiales en SQL Server en una sola consulta
+  Future<bool> eliminarProgramacionesEspecialesServidor(
+    List<Map<String, String>> items,
+  ) async {
+    if (items.isEmpty) return true;
+
+    final connected = await connect();
+    if (!connected) return false;
+
+    try {
+      final whereClauses = items.map((item) {
+        final cedula = item['cedula'] ?? '';
+        final fecha = item['fecha'] ?? '';
+        return "(LTRIM(RTRIM(cedula)) = LTRIM(RTRIM('$cedula')) AND fecha = '$fecha')";
+      }).join(' OR ');
+
+      await SqlConn.write(connectionId, """
+        DELETE FROM programaciones_especiales
+        WHERE $whereClauses
+      """);
+      print('[SqlServer] Eliminadas ${items.length} programaciones especiales en el servidor.');
+      return true;
+    } catch (e) {
+      print('[SqlServer] Error al eliminar programaciones especiales en el servidor: $e');
+      _isConnected = false;
       return false;
     } finally {
       await disconnect();

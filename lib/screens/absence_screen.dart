@@ -12,7 +12,8 @@ class AbsenceScreen extends StatefulWidget {
   State<AbsenceScreen> createState() => _AbsenceScreenState();
 }
 
-class _AbsenceScreenState extends State<AbsenceScreen> with SingleTickerProviderStateMixin {
+class _AbsenceScreenState extends State<AbsenceScreen>
+    with SingleTickerProviderStateMixin {
   final _database = DatabaseService();
   final _syncService = SyncService();
   DateTime _selectedDate = DateTime.now();
@@ -130,10 +131,17 @@ class _AbsenceScreenState extends State<AbsenceScreen> with SingleTickerProvider
     }
   }
 
-  void _showJustificationDialog(Employee employee, Map<String, dynamic>? existingAbsence) {
+  void _showJustificationDialog(
+    Employee employee,
+    Map<String, dynamic>? existingAbsence,
+  ) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    String selectedSigla = existingAbsence?['sigla_ausencia'] ?? (_absenceTypes.isNotEmpty ? _absenceTypes.first['sigla'] : 'F');
-    final noteController = TextEditingController(text: existingAbsence?['observacion'] ?? '');
+    String selectedSigla =
+        existingAbsence?['sigla_ausencia'] ??
+        (_absenceTypes.isNotEmpty ? _absenceTypes.first['sigla'] : 'F');
+    final noteController = TextEditingController(
+      text: existingAbsence?['observacion'] ?? '',
+    );
 
     showDialog(
       context: context,
@@ -142,10 +150,17 @@ class _AbsenceScreenState extends State<AbsenceScreen> with SingleTickerProvider
           builder: (context, setDialogState) {
             return AlertDialog(
               backgroundColor: const Color(0xFF2B3A24),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
               title: Text(
-                existingAbsence != null ? 'Editar Justificación' : 'Justificar Ausencia',
-                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                existingAbsence != null
+                    ? 'Editar Justificación'
+                    : 'Justificar Ausencia',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                ),
               ),
               content: Column(
                 mainAxisSize: MainAxisSize.min,
@@ -158,7 +173,11 @@ class _AbsenceScreenState extends State<AbsenceScreen> with SingleTickerProvider
                   const SizedBox(height: 16),
                   const Text(
                     'Tipo de Novedad:',
-                    style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold),
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 13,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
                   const SizedBox(height: 8),
                   DropdownButton<String>(
@@ -185,7 +204,11 @@ class _AbsenceScreenState extends State<AbsenceScreen> with SingleTickerProvider
                   const SizedBox(height: 16),
                   const Text(
                     'Observaciones:',
-                    style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold),
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 13,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
                   const SizedBox(height: 8),
                   TextField(
@@ -209,16 +232,24 @@ class _AbsenceScreenState extends State<AbsenceScreen> with SingleTickerProvider
                 if (existingAbsence != null)
                   TextButton(
                     onPressed: () async {
-                      final dateStr = DateFormat('yyyy-MM-dd').format(_selectedDate);
+                      final dateStr = DateFormat(
+                        'yyyy-MM-dd',
+                      ).format(_selectedDate);
                       await _database.deleteAbsence(employee.id!, dateStr);
                       Navigator.of(ctx).pop();
                       _loadData();
                     },
-                    child: const Text('Eliminar', style: TextStyle(color: Colors.redAccent)),
+                    child: const Text(
+                      'Eliminar',
+                      style: TextStyle(color: Colors.redAccent),
+                    ),
                   ),
                 TextButton(
                   onPressed: () => Navigator.of(ctx).pop(),
-                  child: const Text('Cancelar', style: TextStyle(color: Colors.white70)),
+                  child: const Text(
+                    'Cancelar',
+                    style: TextStyle(color: Colors.white70),
+                  ),
                 ),
                 ElevatedButton(
                   style: ElevatedButton.styleFrom(
@@ -226,19 +257,29 @@ class _AbsenceScreenState extends State<AbsenceScreen> with SingleTickerProvider
                     foregroundColor: Colors.white,
                   ),
                   onPressed: () async {
-                    final dateStr = DateFormat('yyyy-MM-dd').format(_selectedDate);
+                    final dateStr = DateFormat(
+                      'yyyy-MM-dd',
+                    ).format(_selectedDate);
+                    final deviceId = await _database.getDeviceId();
                     await _database.saveAbsence(
                       employee.id!,
                       dateStr,
                       selectedSigla,
-                      noteController.text.trim().isNotEmpty ? noteController.text.trim() : null,
+                      noteController.text.trim().isNotEmpty
+                          ? noteController.text.trim()
+                          : null,
+                      dispositivoId: deviceId,
                     );
                     Navigator.of(ctx).pop();
                     _loadData();
 
                     // Sincronizar en segundo plano
-                    _syncService.sincronizarAusenciasPendientes().then((result) {
-                      print('[Sync] Sincronización automática de ausencias: $result');
+                    _syncService.sincronizarAusenciasPendientes().then((
+                      result,
+                    ) {
+                      print(
+                        '[Sync] Sincronización automática de ausencias: $result',
+                      );
                     });
                   },
                   child: const Text('Guardar'),
@@ -268,7 +309,9 @@ class _AbsenceScreenState extends State<AbsenceScreen> with SingleTickerProvider
 
   String _getSiglaName(String sigla) {
     final match = _absenceTypes.firstWhere(
-      (t) => t['sigla'].toString().trim().toUpperCase() == sigla.trim().toUpperCase(),
+      (t) =>
+          t['sigla'].toString().trim().toUpperCase() ==
+          sigla.trim().toUpperCase(),
       orElse: () => <String, dynamic>{},
     );
     if (match.isNotEmpty) {
@@ -295,7 +338,9 @@ class _AbsenceScreenState extends State<AbsenceScreen> with SingleTickerProvider
     final dateFormatted = DateFormat('dd/MM/yyyy').format(_selectedDate);
 
     // Listas filtradas
-    final attendedIds = _attendanceRecords.map((a) => a['employee_id'] as int).toSet();
+    final attendedIds = _attendanceRecords
+        .map((a) => a['employee_id'] as int)
+        .toSet();
     final justifiedIds = _absences.map((a) => a['employee_id'] as int).toSet();
     final Map<int, Map<String, dynamic>> absencesMap = {
       for (final a in _absences) a['employee_id'] as int: a,
@@ -306,12 +351,22 @@ class _AbsenceScreenState extends State<AbsenceScreen> with SingleTickerProvider
           e.employeeCode.contains(_searchQuery);
     }).toList();
 
-    final filteredAttended = filteredAll.where((e) => attendedIds.contains(e.id)).toList();
-    final filteredAbsent = filteredAll.where((e) => !attendedIds.contains(e.id) && !justifiedIds.contains(e.id)).toList();
-    final filteredJustified = filteredAll.where((e) => justifiedIds.contains(e.id)).toList();
+    final filteredAttended = filteredAll
+        .where((e) => attendedIds.contains(e.id))
+        .toList();
+    final filteredAbsent = filteredAll
+        .where(
+          (e) => !attendedIds.contains(e.id) && !justifiedIds.contains(e.id),
+        )
+        .toList();
+    final filteredJustified = filteredAll
+        .where((e) => justifiedIds.contains(e.id))
+        .toList();
 
     return Scaffold(
-      backgroundColor: isDark ? AppColors.kioskBackground : AppColors.background,
+      backgroundColor: isDark
+          ? AppColors.kioskBackground
+          : AppColors.background,
       appBar: AppBar(
         title: const Text('Gestión de Ausencias'),
         foregroundColor: isDark ? Colors.white : AppColors.textPrimary,
@@ -329,7 +384,10 @@ class _AbsenceScreenState extends State<AbsenceScreen> with SingleTickerProvider
         children: [
           // Selector de Fecha
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+            padding: const EdgeInsets.symmetric(
+              horizontal: 16.0,
+              vertical: 8.0,
+            ),
             child: Card(
               color: isDark ? AppColors.kioskSurface : Colors.white,
               shape: RoundedRectangleBorder(
@@ -350,7 +408,9 @@ class _AbsenceScreenState extends State<AbsenceScreen> with SingleTickerProvider
                         Text(
                           'Fecha de Reporte',
                           style: TextStyle(
-                            color: isDark ? Colors.white54 : AppColors.textSecondary,
+                            color: isDark
+                                ? Colors.white54
+                                : AppColors.textSecondary,
                             fontSize: 12,
                           ),
                         ),
@@ -358,7 +418,9 @@ class _AbsenceScreenState extends State<AbsenceScreen> with SingleTickerProvider
                         Text(
                           dateFormatted,
                           style: TextStyle(
-                            color: isDark ? Colors.white : AppColors.textPrimary,
+                            color: isDark
+                                ? Colors.white
+                                : AppColors.textPrimary,
                             fontSize: 18,
                             fontWeight: FontWeight.bold,
                           ),
@@ -368,11 +430,21 @@ class _AbsenceScreenState extends State<AbsenceScreen> with SingleTickerProvider
                     ElevatedButton.icon(
                       onPressed: _pickDate,
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: isDark ? Colors.white12 : AppColors.border.withOpacity(0.5),
-                        foregroundColor: isDark ? Colors.white : AppColors.textPrimary,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                        backgroundColor: isDark
+                            ? Colors.white12
+                            : AppColors.border.withOpacity(0.5),
+                        foregroundColor: isDark
+                            ? Colors.white
+                            : AppColors.textPrimary,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
                       ),
-                      icon: const Icon(Icons.date_range_rounded, size: 16, color: AppColors.primary),
+                      icon: const Icon(
+                        Icons.date_range_rounded,
+                        size: 16,
+                        color: AppColors.primary,
+                      ),
                       label: const Text('Cambiar Fecha'),
                     ),
                   ],
@@ -383,20 +455,30 @@ class _AbsenceScreenState extends State<AbsenceScreen> with SingleTickerProvider
 
           // Caja de Búsqueda
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 4.0),
+            padding: const EdgeInsets.symmetric(
+              horizontal: 16.0,
+              vertical: 4.0,
+            ),
             child: TextField(
               onChanged: (val) => setState(() => _searchQuery = val),
-              style: TextStyle(color: isDark ? Colors.white : AppColors.textPrimary),
+              style: TextStyle(
+                color: isDark ? Colors.white : AppColors.textPrimary,
+              ),
               decoration: InputDecoration(
                 filled: true,
                 fillColor: isDark ? AppColors.kioskSurface : Colors.white,
                 hintText: 'Buscar por nombre o cédula...',
                 hintStyle: const TextStyle(color: Colors.grey, fontSize: 13),
-                prefixIcon: const Icon(Icons.search_rounded, color: Colors.grey),
+                prefixIcon: const Icon(
+                  Icons.search_rounded,
+                  color: Colors.grey,
+                ),
                 contentPadding: const EdgeInsets.symmetric(vertical: 0),
                 enabledBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide(color: isDark ? Colors.white10 : AppColors.border),
+                  borderSide: BorderSide(
+                    color: isDark ? Colors.white10 : AppColors.border,
+                  ),
                 ),
                 focusedBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
@@ -412,7 +494,9 @@ class _AbsenceScreenState extends State<AbsenceScreen> with SingleTickerProvider
             isScrollable: false,
             indicatorColor: AppColors.primary,
             labelColor: AppColors.primary,
-            unselectedLabelColor: isDark ? Colors.white54 : AppColors.textSecondary,
+            unselectedLabelColor: isDark
+                ? Colors.white54
+                : AppColors.textSecondary,
             tabs: [
               Tab(text: 'Todos (${filteredAll.length})'),
               Tab(text: 'Asistió (${filteredAttended.length})'),
@@ -424,14 +508,28 @@ class _AbsenceScreenState extends State<AbsenceScreen> with SingleTickerProvider
           // Contenedor de la lista filtrada
           Expanded(
             child: _isLoading
-                ? const Center(child: CircularProgressIndicator(color: AppColors.primary))
+                ? const Center(
+                    child: CircularProgressIndicator(color: AppColors.primary),
+                  )
                 : TabBarView(
                     controller: _tabController,
                     children: [
                       _buildEmployeeList(filteredAll, attendedIds, absencesMap),
-                      _buildEmployeeList(filteredAttended, attendedIds, absencesMap),
-                      _buildEmployeeList(filteredAbsent, attendedIds, absencesMap),
-                      _buildEmployeeList(filteredJustified, attendedIds, absencesMap),
+                      _buildEmployeeList(
+                        filteredAttended,
+                        attendedIds,
+                        absencesMap,
+                      ),
+                      _buildEmployeeList(
+                        filteredAbsent,
+                        attendedIds,
+                        absencesMap,
+                      ),
+                      _buildEmployeeList(
+                        filteredJustified,
+                        attendedIds,
+                        absencesMap,
+                      ),
                     ],
                   ),
           ),
@@ -481,14 +579,22 @@ class _AbsenceScreenState extends State<AbsenceScreen> with SingleTickerProvider
             leading: CircleAvatar(
               backgroundColor: isAttended
                   ? Colors.teal.withOpacity(0.15)
-                  : (isJustified ? _getSiglaColor(absence['sigla_ausencia']).withOpacity(0.15) : Colors.red.withOpacity(0.15)),
+                  : (isJustified
+                        ? _getSiglaColor(
+                            absence['sigla_ausencia'],
+                          ).withOpacity(0.15)
+                        : Colors.red.withOpacity(0.15)),
               child: Icon(
                 isAttended
                     ? Icons.check_circle_rounded
-                    : (isJustified ? Icons.info_outline_rounded : Icons.cancel_outlined),
+                    : (isJustified
+                          ? Icons.info_outline_rounded
+                          : Icons.cancel_outlined),
                 color: isAttended
                     ? Colors.teal
-                    : (isJustified ? _getSiglaColor(absence['sigla_ausencia']) : Colors.redAccent),
+                    : (isJustified
+                          ? _getSiglaColor(absence['sigla_ausencia'])
+                          : Colors.redAccent),
               ),
             ),
             title: Text(
@@ -524,28 +630,49 @@ class _AbsenceScreenState extends State<AbsenceScreen> with SingleTickerProvider
             ),
             trailing: isAttended
                 ? Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 4,
+                    ),
                     decoration: BoxDecoration(
                       color: Colors.teal.withOpacity(0.12),
                       borderRadius: BorderRadius.circular(6),
                     ),
                     child: const Text(
                       'ASISTIÓ',
-                      style: TextStyle(color: Colors.tealAccent, fontSize: 10, fontWeight: FontWeight.bold),
+                      style: TextStyle(
+                        color: Colors.tealAccent,
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
                   )
                 : Container(
                     child: ElevatedButton(
                       onPressed: () => _showJustificationDialog(emp, absence),
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: isJustified ? _getSiglaColor(absence['sigla_ausencia']) : Colors.redAccent.shade700,
+                        backgroundColor: isJustified
+                            ? _getSiglaColor(absence['sigla_ausencia'])
+                            : Colors.redAccent.shade700,
                         foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 4,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(6),
+                        ),
                       ),
                       child: Text(
-                        isJustified ? _getSiglaName(absence['sigla_ausencia']).toUpperCase() : 'JUSTIFICAR',
-                        style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold),
+                        isJustified
+                            ? _getSiglaName(
+                                absence['sigla_ausencia'],
+                              ).toUpperCase()
+                            : 'JUSTIFICAR',
+                        style: const TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
                     ),
                   ),

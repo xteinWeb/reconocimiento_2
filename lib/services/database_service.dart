@@ -1,5 +1,6 @@
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart';
+import 'package:intl/intl.dart';
 import '../models/employee.dart';
 import '../models/face_embedding.dart';
 
@@ -15,7 +16,7 @@ class DatabaseService {
     final path = join(await getDatabasesPath(), 'attendance.db');
     return openDatabase(
       path,
-      version: 9,
+      version: 13,
       onCreate: _createDB,
       onUpgrade: _onUpgrade,
     );
@@ -30,7 +31,8 @@ class DatabaseService {
         department TEXT,
         horario_id TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        is_synced INTEGER DEFAULT 1
+        is_synced INTEGER DEFAULT 1,
+        id_empresa TEXT
       )
     ''');
 
@@ -56,6 +58,7 @@ class DatabaseService {
         duracion TEXT,
         is_synced INTEGER DEFAULT 0,
         metodo_registro TEXT DEFAULT 'FACIAL',
+        dispositivo_id TEXT,
         FOREIGN KEY (employee_id) REFERENCES employees(id)
       )
     ''');
@@ -78,6 +81,7 @@ class DatabaseService {
         sigla_ausencia TEXT NOT NULL,
         observacion TEXT,
         is_synced INTEGER DEFAULT 0,
+        dispositivo_id TEXT,
         FOREIGN KEY (employee_id) REFERENCES employees(id),
         UNIQUE(employee_id, date) ON CONFLICT REPLACE
       )
@@ -94,6 +98,21 @@ class DatabaseService {
       CREATE TABLE system_config (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE special_schedules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        employee_id INTEGER NOT NULL,
+        date TEXT NOT NULL,
+        hora_inicio TEXT,
+        hora_final TEXT,
+        observacion TEXT,
+        is_synced INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (employee_id) REFERENCES employees(id),
+        UNIQUE(employee_id, date) ON CONFLICT REPLACE
       )
     ''');
   }
@@ -195,6 +214,47 @@ class DatabaseService {
         print('Error creating system_config table: $e');
       }
     }
+    if (oldVersion < 10) {
+      try {
+        await db.execute('ALTER TABLE attendance_records ADD COLUMN dispositivo_id TEXT');
+      } catch (e) {
+        print('Column dispositivo_id already exists in attendance_records or error: $e');
+      }
+    }
+    if (oldVersion < 11) {
+      try {
+        await db.execute('ALTER TABLE absences ADD COLUMN dispositivo_id TEXT');
+      } catch (e) {
+        print('Column dispositivo_id already exists in absences or error: $e');
+      }
+    }
+    if (oldVersion < 12) {
+      try {
+        await db.execute('ALTER TABLE employees ADD COLUMN id_empresa TEXT');
+      } catch (e) {
+        print('Column id_empresa already exists in employees or error: $e');
+      }
+    }
+    if (oldVersion < 13) {
+      try {
+        await db.execute('''
+          CREATE TABLE IF NOT EXISTS special_schedules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            employee_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            hora_inicio TEXT,
+            hora_final TEXT,
+            observacion TEXT,
+            is_synced INTEGER DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (employee_id) REFERENCES employees(id),
+            UNIQUE(employee_id, date) ON CONFLICT REPLACE
+          )
+        ''');
+      } catch (e) {
+        print('Error creating special_schedules table: $e');
+      }
+    }
   }
 
   // CONFIGURACIÓN DE SISTEMA
@@ -287,8 +347,22 @@ class DatabaseService {
     String? duracion,
     int isSynced = 0,
     String metodoRegistro = 'FACIAL',
+    String? dispositivoId,
   }) async {
     final db = await database;
+    
+    // Protección contra duplicados accidentales: cooldown de 15 segundos
+    final checkTime = timestamp.subtract(const Duration(seconds: 15)).toIso8601String();
+    final recent = await db.query(
+      'attendance_records',
+      where: 'employee_id = ? AND evento = ? AND timestamp >= ?',
+      whereArgs: [employeeId, evento ?? 'ENTRADA', checkTime],
+    );
+    if (recent.isNotEmpty) {
+      print('[DatabaseService] Marcación duplicada detectada para el empleado $employeeId ($evento). Omitiendo inserción.');
+      return -1;
+    }
+
     return db.insert('attendance_records', {
       'employee_id': employeeId,
       'timestamp': timestamp.toIso8601String(),
@@ -298,6 +372,7 @@ class DatabaseService {
       'duracion': duracion,
       'is_synced': isSynced,
       'metodo_registro': metodoRegistro,
+      'dispositivo_id': dispositivoId,
     });
   }
 
@@ -314,7 +389,7 @@ class DatabaseService {
   Future<List<Map<String, dynamic>>> getPendingAttendanceRecords() async {
     final db = await database;
     return db.rawQuery('''
-      SELECT ar.*, e.name AS employee_name, e.employee_code AS employee_code, e.department AS employee_department
+      SELECT ar.*, e.name AS employee_name, e.employee_code AS employee_code, e.department AS employee_department, e.id_empresa AS id_empresa
       FROM attendance_records ar
       JOIN employees e ON ar.employee_id = e.id
       WHERE ar.is_synced = 0 OR ar.is_synced IS NULL
@@ -337,7 +412,7 @@ class DatabaseService {
     }
 
     return db.rawQuery('''
-      SELECT ar.*, e.name AS employee_name, e.employee_code AS employee_code, e.department AS employee_department
+      SELECT ar.*, e.name AS employee_name, e.employee_code AS employee_code, e.department AS employee_department, e.id_empresa AS id_empresa
       FROM attendance_records ar
       JOIN employees e ON ar.employee_id = e.id
       $whereClause
@@ -380,7 +455,7 @@ class DatabaseService {
     final start = DateTime(date.year, date.month, date.day).toIso8601String();
     final end = DateTime(date.year, date.month, date.day, 23, 59, 59).toIso8601String();
     return db.rawQuery('''
-      SELECT ar.*, e.name AS employee_name, e.employee_code AS employee_code, e.department AS employee_department
+      SELECT ar.*, e.name AS employee_name, e.employee_code AS employee_code, e.department AS employee_department, e.id_empresa AS id_empresa
       FROM attendance_records ar
       JOIN employees e ON ar.employee_id = e.id
       WHERE ar.timestamp BETWEEN ? AND ?
@@ -391,7 +466,7 @@ class DatabaseService {
   Future<List<Map<String, dynamic>>> getAttendanceByEmployee(int employeeId) async {
     final db = await database;
     return db.rawQuery('''
-      SELECT ar.*, e.name AS employee_name, e.employee_code AS employee_code, e.department AS employee_department
+      SELECT ar.*, e.name AS employee_name, e.employee_code AS employee_code, e.department AS employee_department, e.id_empresa AS id_empresa
       FROM attendance_records ar
       JOIN employees e ON ar.employee_id = e.id
       WHERE ar.employee_id = ?
@@ -404,7 +479,7 @@ class DatabaseService {
     final startStr = DateTime(start.year, start.month, start.day).toIso8601String();
     final endStr = DateTime(end.year, end.month, end.day, 23, 59, 59).toIso8601String();
     return db.rawQuery('''
-      SELECT ar.*, e.name AS employee_name, e.employee_code AS employee_code, e.department AS employee_department
+      SELECT ar.*, e.name AS employee_name, e.employee_code AS employee_code, e.department AS employee_department, e.id_empresa AS id_empresa
       FROM attendance_records ar
       JOIN employees e ON ar.employee_id = e.id
       WHERE ar.timestamp BETWEEN ? AND ?
@@ -417,7 +492,7 @@ class DatabaseService {
     final startStr = DateTime(start.year, start.month, start.day).toIso8601String();
     final endStr = DateTime(end.year, end.month, end.day, 23, 59, 59).toIso8601String();
     return db.rawQuery('''
-      SELECT ar.*, e.name AS employee_name, e.employee_code AS employee_code, e.department AS employee_department
+      SELECT ar.*, e.name AS employee_name, e.employee_code AS employee_code, e.department AS employee_department, e.id_empresa AS id_empresa
       FROM attendance_records ar
       JOIN employees e ON ar.employee_id = e.id
       WHERE ar.employee_id = ? AND ar.timestamp BETWEEN ? AND ?
@@ -452,7 +527,7 @@ class DatabaseService {
   }
 
   // AUSENTISMOS / ABSENCES
-  Future<int> saveAbsence(int employeeId, String date, String sigla, String? observacion, {int isSynced = 0}) async {
+  Future<int> saveAbsence(int employeeId, String date, String sigla, String? observacion, {int isSynced = 0, String? dispositivoId}) async {
     final db = await database;
     return db.insert(
       'absences',
@@ -462,6 +537,7 @@ class DatabaseService {
         'sigla_ausencia': sigla,
         'observacion': observacion,
         'is_synced': isSynced,
+        'dispositivo_id': dispositivoId,
       },
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
@@ -506,6 +582,34 @@ class DatabaseService {
     );
   }
 
+  Future<List<Map<String, dynamic>>> getAbsencesByDateRange(DateTime start, DateTime end) async {
+    final db = await database;
+    final startStr = DateFormat('yyyy-MM-dd').format(start);
+    final endStr = DateFormat('yyyy-MM-dd').format(end);
+    return db.rawQuery('''
+      SELECT a.*, e.name AS employee_name, e.employee_code AS employee_code, e.department AS employee_department, e.id_empresa AS id_empresa, at.nombre AS absence_name
+      FROM absences a
+      JOIN employees e ON a.employee_id = e.id
+      LEFT JOIN absence_types at ON a.sigla_ausencia = at.sigla
+      WHERE a.date >= ? AND a.date <= ?
+      ORDER BY a.date ASC
+    ''', [startStr, endStr]);
+  }
+
+  Future<List<Map<String, dynamic>>> getAbsencesByEmployeeAndDateRange(int employeeId, DateTime start, DateTime end) async {
+    final db = await database;
+    final startStr = DateFormat('yyyy-MM-dd').format(start);
+    final endStr = DateFormat('yyyy-MM-dd').format(end);
+    return db.rawQuery('''
+      SELECT a.*, e.name AS employee_name, e.employee_code AS employee_code, e.department AS employee_department, e.id_empresa AS id_empresa, at.nombre AS absence_name
+      FROM absences a
+      JOIN employees e ON a.employee_id = e.id
+      LEFT JOIN absence_types at ON a.sigla_ausencia = at.sigla
+      WHERE a.employee_id = ? AND a.date >= ? AND a.date <= ?
+      ORDER BY a.date ASC
+    ''', [employeeId, startStr, endStr]);
+  }
+
   // TIPOS DE AUSENCIA / NOVEDADES
   Future<int> saveAbsenceType(Map<String, dynamic> type) async {
     final db = await database;
@@ -519,5 +623,121 @@ class DatabaseService {
   Future<List<Map<String, dynamic>>> getAllAbsenceTypes() async {
     final db = await database;
     return db.query('absence_types', orderBy: 'nombre ASC');
+  }
+
+  Future<int> saveSpecialSchedule(Map<String, dynamic> schedule) async {
+    final db = await database;
+    return db.insert(
+      'special_schedules',
+      schedule,
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  Future<void> saveSpecialSchedulesBatch(List<Map<String, dynamic>> schedules) async {
+    final db = await database;
+    final batch = db.batch();
+    for (final schedule in schedules) {
+      batch.insert(
+        'special_schedules',
+        schedule,
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    }
+    await batch.commit(noResult: true);
+  }
+
+  Future<int> deleteSpecialSchedule(int id) async {
+    final db = await database;
+    return db.delete('special_schedules', where: 'id = ?', whereArgs: [id]);
+  }
+
+  Future<Map<String, dynamic>?> getSpecialScheduleForEmployee(int employeeId, String dateStr) async {
+    final db = await database;
+    final results = await db.query(
+      'special_schedules',
+      where: 'employee_id = ? AND date = ?',
+      whereArgs: [employeeId, dateStr],
+    );
+    if (results.isNotEmpty) {
+      return results.first;
+    }
+    return null;
+  }
+
+  Future<List<Map<String, dynamic>>> getSpecialSchedulesByDate(String dateStr) async {
+    final db = await database;
+    return db.rawQuery('''
+      SELECT ss.*, e.name AS employee_name, e.employee_code AS employee_code, e.department AS employee_department, e.horario_id AS employee_horario_id
+      FROM special_schedules ss
+      JOIN employees e ON ss.employee_id = e.id
+      WHERE ss.date = ?
+      ORDER BY e.name ASC
+    ''', [dateStr]);
+  }
+
+  Future<List<Map<String, dynamic>>> getAllSpecialSchedules() async {
+    final db = await database;
+    return db.rawQuery('''
+      SELECT ss.*, e.name AS employee_name, e.employee_code AS employee_code, e.department AS employee_department, e.horario_id AS employee_horario_id
+      FROM special_schedules ss
+      JOIN employees e ON ss.employee_id = e.id
+      ORDER BY ss.date DESC, e.name ASC
+    ''');
+  }
+
+  Future<bool> hasAnySpecialScheduleOnDate(String dateStr) async {
+    final db = await database;
+    final res = await db.query(
+      'special_schedules',
+      where: 'date = ?',
+      whereArgs: [dateStr],
+      limit: 1,
+    );
+    return res.isNotEmpty;
+  }
+
+  Future<List<Map<String, dynamic>>> getPendingSpecialSchedules() async {
+    final db = await database;
+    return db.rawQuery('''
+      SELECT ss.*, e.employee_code AS employee_code
+      FROM special_schedules ss
+      JOIN employees e ON ss.employee_id = e.id
+      WHERE ss.is_synced = 0 OR ss.is_synced IS NULL
+    ''');
+  }
+
+  Future<void> markSpecialScheduleAsSynced(int id) async {
+    final db = await database;
+    await db.update(
+      'special_schedules',
+      {'is_synced': 1},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  Future<void> upsertSpecialScheduleFromServer(Map<String, dynamic> data) async {
+    final db = await database;
+    final String? cedula = data['cedula']?.toString().trim();
+    final String? date = data['date']?.toString().trim();
+    if (cedula == null || date == null) return;
+
+    final empList = await db.query('employees', where: 'employee_code = ?', whereArgs: [cedula]);
+    if (empList.isEmpty) return;
+    final int employeeId = empList.first['id'] as int;
+
+    await db.insert(
+      'special_schedules',
+      {
+        'employee_id': employeeId,
+        'date': date,
+        'hora_inicio': data['hora_inicio'],
+        'hora_final': data['hora_final'],
+        'observacion': data['observacion'],
+        'is_synced': 1,
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
   }
 }

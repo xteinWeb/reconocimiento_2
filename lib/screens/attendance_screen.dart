@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
+import 'package:intl/intl.dart';
 import '../services/camera_service.dart';
 import '../services/face_detection_service.dart';
 import '../services/face_recognition_service.dart';
@@ -136,6 +137,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         allEmbeddings,
       );
 
+      /*
       // Obtener las 3 mejores coincidencias para depuración/testing
       final topMatchesRaw = _faceRecognition.findTopMatches(
         currentEmbedding,
@@ -156,11 +158,12 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       setState(() {
         _topMatches = resolvedMatches;
       });
+      */
 
       debugPrint(
         '[FaceRecognition] ID detectado: $matchedId, Distancia calculada: ${distance.toStringAsFixed(4)}',
       );
-      const threshold = 0.15;
+      const threshold = 0.35;
 
       if (distance < threshold && matchedId != null) {
         final employee = await _database.getEmployeeById(matchedId);
@@ -168,13 +171,14 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           // 1. Pausar el temporizador automático temporalmente para no acumular fotos
           _autoTimer?.cancel();
 
-          // 1.1 Verificar si el colaborador tiene un horario asignado
-          Map<String, dynamic>? horario;
-          if (employee.horarioId != null) {
-            horario = await _database.getScheduleById(employee.horarioId!);
-          }
+          final now = DateTime.now();
 
-          if (horario == null) {
+          // 1.1 Verificar si el colaborador tiene un horario asignado o programación especial
+          final scheduleRes = await _resolveEffectiveSchedule(employee, now);
+          final horario = scheduleRes.horario;
+          final isNotProgrammed = scheduleRes.isNotProgrammed;
+
+          if (horario == null && !isNotProgrammed) {
             setState(() {
               _status = "Acceso denegado: Sin horario asignado.";
               _scanState = ScanState.failure;
@@ -226,48 +230,6 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             });
             _resumeAutoTimerAfterDelay();
             return;
-          }
-
-          final now = DateTime.now();
-
-          // 2.1 Si es SALIDA, validar salida temprana
-          if (selection == 'SALIDA') {
-            final esTemprana = ScheduleValidator.esSalidaTemprana(horario, now);
-            if (esTemprana) {
-              setState(() {
-                _status = "Registro inválido: Salida anticipada.";
-                _scanState = ScanState.failure;
-              });
-
-              if (mounted) {
-                await showDialog(
-                  context: context,
-                  builder: (ctx) => AlertDialog(
-                    backgroundColor: const Color(0xFF2B3A24),
-                    title: const Text(
-                      'Salida Anticipada',
-                      style: TextStyle(color: Colors.white),
-                    ),
-                    content: Text(
-                      'No tienes permitido registrar la salida antes de tu hora establecida (${horario!['hora_final']}).',
-                      style: const TextStyle(color: Colors.white70),
-                    ),
-                    actions: [
-                      TextButton(
-                        onPressed: () => Navigator.of(ctx).pop(),
-                        child: const Text(
-                          'Aceptar',
-                          style: TextStyle(color: Colors.amber),
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              }
-
-              _resumeAutoTimerAfterDelay();
-              return;
-            }
           }
 
           // 3. Validar marcación consecutiva
@@ -325,21 +287,34 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             }
           }
 
-          // 4. Calcular retardo si es ENTRADA
+          // 4. Calcular retardo si es ENTRADA o si es salida temprana / no programado
           String tipoFinal = 'NORMAL';
           String? duracionRetardo;
           String feedbackMsg = '¡Asistencia registrada!';
 
-          if (selection == 'ENTRADA') {
+          if (isNotProgrammed) {
+            tipoFinal = 'NO_PROGRAMADO';
+            duracionRetardo = null;
+            feedbackMsg = selection == 'ENTRADA'
+                ? 'Entrada registrada — No estabas programado hoy.'
+                : 'Salida registrada — No estabas programado hoy.';
+          } else if (selection == 'ENTRADA') {
             final validation = ScheduleValidator.validarMarcacion(horario, now);
             tipoFinal = validation.tipo;
             duracionRetardo = validation.duracion;
             feedbackMsg = validation.descripcion;
           } else {
-            feedbackMsg = 'Salida registrada. ¡Hasta mañana!';
+            // Verificar si es salida temprana
+            if (horario != null && ScheduleValidator.esSalidaTemprana(horario, now)) {
+              tipoFinal = 'SALIDA_TEMPRANA';
+              feedbackMsg = 'Salida anticipada registrada.';
+            } else {
+              feedbackMsg = 'Salida registrada. ¡Hasta mañana!';
+            }
           }
 
           // 5. Guardar localmente en SQLite
+          final deviceId = await _database.getDeviceId();
           final recordId = await _database.insertAttendance(
             matchedId,
             now,
@@ -348,6 +323,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             tipo: tipoFinal,
             duracion: duracionRetardo,
             isSynced: 0,
+            dispositivoId: deviceId,
           );
 
           // 6. Sincronización en segundo plano con el servidor SQL Server central (offline-friendly)
@@ -416,6 +392,66 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     setState(() {
       _isProcessing = false;
     });
+  }
+
+  Future<({Map<String, dynamic>? horario, bool isNotProgrammed})> _resolveEffectiveSchedule(
+    Employee employee,
+    DateTime now,
+  ) async {
+    final dateStr = DateFormat('yyyy-MM-dd').format(now);
+    final specialSchedule = await _database.getSpecialScheduleForEmployee(employee.id!, dateStr);
+    final isSpecialDay = await _database.hasAnySpecialScheduleOnDate(dateStr);
+
+    if (specialSchedule != null) {
+      final hInicio = specialSchedule['hora_inicio']?.toString();
+      final hFinal = specialSchedule['hora_final']?.toString();
+
+      if (hInicio != null && hInicio.isNotEmpty && hFinal != null && hFinal.isNotEmpty) {
+        return (
+          horario: {
+            'id_horario': 'ESPECIAL',
+            'hora_inicio': hInicio,
+            'hora_final': hFinal,
+            'tipo': 'ESPECIAL',
+            'dias': 'L,M,Mi,J,V,S,D',
+          },
+          isNotProgrammed: false,
+        );
+      } else {
+        Map<String, dynamic>? baseHorario;
+        if (employee.horarioId != null) {
+          baseHorario = await _database.getScheduleById(employee.horarioId!);
+        }
+        if (baseHorario != null) {
+          final modHorario = Map<String, dynamic>.from(baseHorario);
+          modHorario['dias'] = 'L,M,Mi,J,V,S,D';
+          return (horario: modHorario, isNotProgrammed: false);
+        } else {
+          return (
+            horario: {
+              'id_horario': 'ESPECIAL',
+              'hora_inicio': '07:00',
+              'hora_final': '17:00',
+              'tipo': 'ESPECIAL',
+              'dias': 'L,M,Mi,J,V,S,D',
+            },
+            isNotProgrammed: false,
+          );
+        }
+      }
+    } else if (isSpecialDay) {
+      Map<String, dynamic>? baseHorario;
+      if (employee.horarioId != null) {
+        baseHorario = await _database.getScheduleById(employee.horarioId!);
+      }
+      return (horario: baseHorario, isNotProgrammed: true);
+    } else {
+      Map<String, dynamic>? baseHorario;
+      if (employee.horarioId != null) {
+        baseHorario = await _database.getScheduleById(employee.horarioId!);
+      }
+      return (horario: baseHorario, isNotProgrammed: false);
+    }
   }
 
   Future<void> _marcarConCedula() async {
@@ -503,12 +539,12 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         return;
       }
 
-      Map<String, dynamic>? horario;
-      if (employee.horarioId != null) {
-        horario = await _database.getScheduleById(employee.horarioId!);
-      }
+      final now = DateTime.now();
+      final scheduleRes = await _resolveEffectiveSchedule(employee, now);
+      final horario = scheduleRes.horario;
+      final isNotProgrammed = scheduleRes.isNotProgrammed;
 
-      if (horario == null) {
+      if (horario == null && !isNotProgrammed) {
         setState(() {
           _status = "Acceso denegado: Sin horario asignado.";
           _scanState = ScanState.failure;
@@ -560,48 +596,6 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         });
         _resumeAutoTimerAfterDelay();
         return;
-      }
-
-      final now = DateTime.now();
-
-      if (selection == 'SALIDA') {
-        final esTemprana = ScheduleValidator.esSalidaTemprana(horario, now);
-        if (esTemprana) {
-          setState(() {
-            _status = "Registro inválido: Salida anticipada.";
-            _scanState = ScanState.failure;
-            _isProcessing = false;
-          });
-
-          if (mounted) {
-            await showDialog(
-              context: context,
-              builder: (ctx) => AlertDialog(
-                backgroundColor: const Color(0xFF2B3A24),
-                title: const Text(
-                  'Salida Anticipada',
-                  style: TextStyle(color: Colors.white),
-                ),
-                content: Text(
-                  'No tienes permitido registrar la salida antes de tu hora establecida (${horario!['hora_final']}).',
-                  style: const TextStyle(color: Colors.white70),
-                ),
-                actions: [
-                  TextButton(
-                    onPressed: () => Navigator.of(ctx).pop(),
-                    child: const Text(
-                      'Aceptar',
-                      style: TextStyle(color: Colors.amber),
-                    ),
-                  ),
-                ],
-              ),
-            );
-          }
-
-          _resumeAutoTimerAfterDelay();
-          return;
-        }
       }
 
       final lastRecord = await _database.getLastAttendanceForEmployee(
@@ -663,15 +657,28 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       String? duracionRetardo;
       String feedbackMsg = '¡Asistencia registrada!';
 
-      if (selection == 'ENTRADA') {
+      if (isNotProgrammed) {
+        tipoFinal = 'NO_PROGRAMADO';
+        duracionRetardo = null;
+        feedbackMsg = selection == 'ENTRADA'
+            ? 'Entrada registrada — No estabas programado hoy.'
+            : 'Salida registrada — No estabas programado hoy.';
+      } else if (selection == 'ENTRADA') {
         final validation = ScheduleValidator.validarMarcacion(horario, now);
         tipoFinal = validation.tipo;
         duracionRetardo = validation.duracion;
         feedbackMsg = validation.descripcion;
       } else {
-        feedbackMsg = 'Salida registrada. ¡Hasta mañana!';
+        // Verificar si es salida temprana
+        if (horario != null && ScheduleValidator.esSalidaTemprana(horario, now)) {
+          tipoFinal = 'SALIDA_TEMPRANA';
+          feedbackMsg = 'Salida anticipada registrada.';
+        } else {
+          feedbackMsg = 'Salida registrada. ¡Hasta mañana!';
+        }
       }
 
+      final deviceId = await _database.getDeviceId();
       final recordId = await _database.insertAttendance(
         employee.id!,
         now,
@@ -681,6 +688,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         duracion: duracionRetardo,
         isSynced: 0,
         metodoRegistro: 'CEDULA',
+        dispositivoId: deviceId,
       );
 
       setState(() {
@@ -950,7 +958,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                       );
 
                       // Highlight if it's below the threshold (recognized)
-                      final isMatch = distance < 0.2;
+                      final isMatch = distance < 0.35;
 
                       return Container(
                         margin: const EdgeInsets.symmetric(vertical: 4),
