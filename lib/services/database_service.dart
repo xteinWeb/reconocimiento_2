@@ -16,7 +16,7 @@ class DatabaseService {
     final path = join(await getDatabasesPath(), 'attendance.db');
     return openDatabase(
       path,
-      version: 13,
+      version: 15,
       onCreate: _createDB,
       onUpgrade: _onUpgrade,
     );
@@ -32,7 +32,8 @@ class DatabaseService {
         horario_id TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         is_synced INTEGER DEFAULT 1,
-        id_empresa TEXT
+        id_empresa TEXT,
+        id_un_item TEXT
       )
     ''');
 
@@ -65,7 +66,8 @@ class DatabaseService {
 
     await db.execute('''
       CREATE TABLE schedules (
-        id_horario TEXT PRIMARY KEY,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id_horario TEXT NOT NULL,
         hora_inicio TEXT NOT NULL,
         hora_final TEXT NOT NULL,
         tipo TEXT NOT NULL,
@@ -253,6 +255,30 @@ class DatabaseService {
         ''');
       } catch (e) {
         print('Error creating special_schedules table: $e');
+      }
+    }
+    if (oldVersion < 14) {
+      try {
+        await db.execute('DROP TABLE IF EXISTS schedules');
+        await db.execute('''
+          CREATE TABLE schedules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id_horario TEXT NOT NULL,
+            hora_inicio TEXT NOT NULL,
+            hora_final TEXT NOT NULL,
+            tipo TEXT NOT NULL,
+            dias TEXT NOT NULL
+          )
+        ''');
+      } catch (e) {
+        print('Error updating schedules table: $e');
+      }
+    }
+    if (oldVersion < 15) {
+      try {
+        await db.execute('ALTER TABLE employees ADD COLUMN id_un_item TEXT');
+      } catch (e) {
+        print('Error adding id_un_item column to employees table: $e');
       }
     }
   }
@@ -501,24 +527,54 @@ class DatabaseService {
   }
 
   // HORARIOS
+  Future<int> clearSchedules() async {
+    final db = await database;
+    return db.delete('schedules');
+  }
+
   Future<int> saveSchedule(Map<String, dynamic> schedule) async {
     final db = await database;
     return db.insert(
       'schedules',
       schedule,
-      conflictAlgorithm: ConflictAlgorithm.replace,
     );
   }
 
-  Future<Map<String, dynamic>?> getScheduleById(String idHorario) async {
+  /// Obtiene el sub-horario específico según el id_horario y la fecha (evaluando el día de la semana)
+  Future<Map<String, dynamic>?> getScheduleByIdAndDate(String idHorario, DateTime date) async {
     final db = await database;
-    final maps = await db.query(
+    final allRows = await db.query(
       'schedules',
       where: 'id_horario = ?',
       whereArgs: [idHorario],
     );
-    if (maps.isEmpty) return null;
-    return maps.first;
+
+    if (allRows.isEmpty) return null;
+
+    final String dayCode = switch (date.weekday) {
+      1 => 'L',
+      2 => 'M',
+      3 => 'Mi',
+      4 => 'J',
+      5 => 'V',
+      6 => 'S',
+      7 => 'D',
+      _ => 'D',
+    };
+
+    for (final row in allRows) {
+      final String dias = row['dias']?.toString() ?? '';
+      final List<String> daysList = dias.split(',').map((d) => d.trim()).toList();
+      if (daysList.contains(dayCode)) {
+        return row;
+      }
+    }
+
+    return allRows.first;
+  }
+
+  Future<Map<String, dynamic>?> getScheduleById(String idHorario) async {
+    return getScheduleByIdAndDate(idHorario, DateTime.now());
   }
 
   Future<List<Map<String, dynamic>>> getAllSchedules() async {

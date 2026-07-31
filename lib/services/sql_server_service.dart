@@ -53,14 +53,24 @@ class SqlServerService {
     }
 
     try {
-      // 0. Asegurar existencia de la columna 'nombre_seccion' en 'empleados_asistencia'
+      // 0. Asegurar existencia de las columnas 'nombre_seccion' e 'id_un_item' en 'empleados_asistencia'
       await SqlConn.write(connectionId, """
         IF NOT EXISTS (
-            SELECT * FROM INFORMATION_SCHEMA.COLUMNS 
-            WHERE TABLE_NAME = 'empleados_asistencia' AND COLUMN_NAME = 'nombre_seccion'
+            SELECT 1 FROM sys.columns 
+            WHERE object_id = OBJECT_ID('empleados_asistencia') AND name = 'nombre_seccion'
         )
         BEGIN
           ALTER TABLE empleados_asistencia ADD nombre_seccion VARCHAR(200) NULL;
+        END
+      """);
+
+      await SqlConn.write(connectionId, """
+        IF NOT EXISTS (
+            SELECT 1 FROM sys.columns 
+            WHERE object_id = OBJECT_ID('empleados_asistencia') AND name = 'id_un_item'
+        )
+        BEGIN
+          ALTER TABLE empleados_asistencia ADD id_un_item VARCHAR(50) NULL;
         END
       """);
 
@@ -93,13 +103,14 @@ class SqlServerService {
         WHERE ea.id_empresa IS NULL OR ea.id_empresa <> emp.ID_EMPRESA
       """);
 
-      // Actualizar 'id_seccion', 'sede_principal' y 'tipo' en 'empleados_asistencia' desde ERP
-      print('[SqlServer] Actualizando id_seccion, sede_principal y tipo en empleados_asistencia...');
+      // Actualizar 'id_seccion', 'sede_principal', 'id_un_item' y 'tipo' en 'empleados_asistencia' desde ERP
+      print('[SqlServer] Actualizando id_seccion, sede_principal, id_un_item y tipo en empleados_asistencia...');
       await SqlConn.write(connectionId, """
         UPDATE ea
         SET 
             ea.id_seccion = ies.ID_SECCION,
-            ea.sede_principal = COALESCE(emp.ID_UN_ITEM, ea.sede_principal),
+            ea.sede_principal = COALESCE(sec.ID_UN_ITEM, emp.ID_UN_ITEM, ea.sede_principal),
+            ea.id_un_item = COALESCE(sec.ID_UN_ITEM, emp.ID_UN_ITEM, ea.id_un_item),
             ea.tipo = COALESCE(ies.ID_ACTIVIDAD, ea.tipo)
         FROM empleados_asistencia ea
         INNER JOIN empleados emp ON LTRIM(RTRIM(ea.cedula)) = LTRIM(RTRIM(emp.ID_EMPLEADO))
@@ -109,8 +120,10 @@ class SqlServerService {
             WHERE TIPO = 'PRINCIPAL'
             GROUP BY LTRIM(RTRIM(ID_EMPLEADO)), ID_UN
         ) ies ON LTRIM(RTRIM(ea.cedula)) = ies.ID_EMPLEADO AND COALESCE(emp.ID_UN, '00') = ies.ID_UN
+        LEFT JOIN secciones sec ON LTRIM(RTRIM(ies.ID_SECCION)) = LTRIM(RTRIM(sec.ID_SECCION)) AND (sec.ID_UN = ies.ID_UN OR sec.ID_UN = '00')
         WHERE (ea.id_seccion IS NULL OR ea.id_seccion <> ies.ID_SECCION
-            OR ea.sede_principal IS NULL OR ea.sede_principal <> emp.ID_UN_ITEM
+            OR ea.id_un_item IS NULL OR ea.id_un_item <> COALESCE(sec.ID_UN_ITEM, emp.ID_UN_ITEM)
+            OR ea.sede_principal IS NULL OR ea.sede_principal <> COALESCE(sec.ID_UN_ITEM, emp.ID_UN_ITEM)
             OR ea.tipo IS NULL OR ea.tipo <> ies.ID_ACTIVIDAD)
       """);
 
@@ -152,7 +165,7 @@ class SqlServerService {
       // 3. Insertar nuevos empleados activos en 'empleados_asistencia'
       print('[SqlServer] Insertando nuevos empleados...');
       await SqlConn.write(connectionId, """
-        INSERT INTO empleados_asistencia (cedula, nombre, estado, fecha_creacion, id_empresa, id_seccion, nombre_seccion, sede_principal, tipo)
+        INSERT INTO empleados_asistencia (cedula, nombre, estado, fecha_creacion, id_empresa, id_seccion, nombre_seccion, sede_principal, id_un_item, tipo)
         SELECT 
             emp.ID_EMPLEADO,
             LTRIM(RTRIM(
@@ -166,7 +179,8 @@ class SqlServerService {
             emp.ID_EMPRESA,
             COALESCE(NULLIF(LTRIM(RTRIM(ies.ID_SECCION)), ''), 'ADMINISTRATIVO'),
             COALESCE(NULLIF(LTRIM(RTRIM(sec.DESCRIPCION)), ''), 'ADMINISTRATIVO'),
-            emp.ID_UN_ITEM,
+            COALESCE(sec.ID_UN_ITEM, emp.ID_UN_ITEM),
+            COALESCE(sec.ID_UN_ITEM, emp.ID_UN_ITEM),
             ies.ID_ACTIVIDAD
         FROM empleados emp
         INNER JOIN IDENTIFICACIONES_LEGALES il ON emp.ID_LEGAL = il.ID_LEGAL
@@ -203,7 +217,7 @@ class SqlServerService {
             COALESCE(ea.fecha_ini_contrato, '0') AS fecha_ini_contrato,
             COALESCE(ea.fecha_fin_contrato, '0') AS fecha_fin_contrato,
             COALESCE(emp.ESTADO, ea.estado, 'ACTIVO') AS estado,
-            COALESCE(ea.sede_principal, emp.ID_UN_ITEM, '') AS sede_principal,
+            COALESCE(sec.ID_UN_ITEM, ea.id_un_item, ea.sede_principal, emp.ID_UN_ITEM, '') AS sede_principal,
             COALESCE(NULLIF(LTRIM(RTRIM(ies.ID_SECCION)), ''), NULLIF(LTRIM(RTRIM(ea.id_seccion)), ''), 'ADMINISTRATIVO') AS id_seccion,
             COALESCE(NULLIF(LTRIM(RTRIM(sec.DESCRIPCION)), ''), NULLIF(LTRIM(RTRIM(ea.nombre_seccion)), ''), 'ADMINISTRATIVO') AS nombre_seccion,
             COALESCE(ea.tipo, ies.ID_ACTIVIDAD, '') AS tipo,
@@ -272,10 +286,11 @@ class SqlServerService {
                 fecha_fin_contrato = ${fechaFinContrato != null ? "'$fechaFinContrato'" : 'target.fecha_fin_contrato'},
                 estado = 'ACTIVO',
                 sede_principal = ${sedePrincipal != null ? "'$sedePrincipal'" : 'target.sede_principal'},
+                id_un_item = ${sedePrincipal != null ? "'$sedePrincipal'" : 'target.id_un_item'},
                 id_seccion = ${idSeccion != null ? "'$idSeccion'" : 'target.id_seccion'},
                 tipo = ${tipo != null ? "'$tipo'" : 'target.tipo'}
         WHEN NOT MATCHED THEN
-            INSERT (cedula, nombre, mapa_vector_foto, horario_id, fecha_ini_contrato, fecha_fin_contrato, estado, sede_principal, id_seccion, tipo, fecha_creacion)
+            INSERT (cedula, nombre, mapa_vector_foto, horario_id, fecha_ini_contrato, fecha_fin_contrato, estado, sede_principal, id_un_item, id_seccion, tipo, fecha_creacion)
             VALUES (
               '$cedula', 
               ${nombre != null ? "'$nombre'" : "'Nuevo Empleado'"}, 
@@ -284,6 +299,7 @@ class SqlServerService {
               ${fechaIniContrato != null ? "'$fechaIniContrato'" : 'NULL'}, 
               ${fechaFinContrato != null ? "'$fechaFinContrato'" : 'NULL'}, 
               'ACTIVO', 
+              ${sedePrincipal != null ? "'$sedePrincipal'" : 'NULL'}, 
               ${sedePrincipal != null ? "'$sedePrincipal'" : 'NULL'}, 
               ${idSeccion != null ? "'$idSeccion'" : 'NULL'}, 
               ${tipo != null ? "'$tipo'" : 'NULL'}, 
@@ -374,7 +390,7 @@ class SqlServerService {
     }
 
     try {
-      print('[SqlServer] Obteniendo detalles de itm_horarios...');
+      print('[SqlServer] Obteniendo detalles de itm_horarios por bloques de días...');
       final results = await SqlConn.read(connectionId, """
         SELECT 
             LTRIM(RTRIM(ID_HORARIO)) AS id_horario,
@@ -382,18 +398,23 @@ class SqlServerService {
             CONVERT(VARCHAR(5), MAX(FINAL), 108) AS hora_final,
             'PRODUCTIVA' AS tipo,
             STUFF(
-              (CASE WHEN MAX(CAST(LUNES AS INT)) = 1 THEN ',L' ELSE '' END) +
-              (CASE WHEN MAX(CAST(MARTES AS INT)) = 1 THEN ',M' ELSE '' END) +
-              (CASE WHEN MAX(CAST(MIERCOLES AS INT)) = 1 THEN ',Mi' ELSE '' END) +
-              (CASE WHEN MAX(CAST(JUEVES AS INT)) = 1 THEN ',J' ELSE '' END) +
-              (CASE WHEN MAX(CAST(VIERNES AS INT)) = 1 THEN ',V' ELSE '' END) +
-              (CASE WHEN MAX(CAST(SABADO AS INT)) = 1 THEN ',S' ELSE '' END) +
-              (CASE WHEN MAX(CAST(DOMINGO AS INT)) = 1 THEN ',D' ELSE '' END),
+              (CASE WHEN LUNES = 1 THEN ',L' ELSE '' END) +
+              (CASE WHEN MARTES = 1 THEN ',M' ELSE '' END) +
+              (CASE WHEN MIERCOLES = 1 THEN ',Mi' ELSE '' END) +
+              (CASE WHEN JUEVES = 1 THEN ',J' ELSE '' END) +
+              (CASE WHEN VIERNES = 1 THEN ',V' ELSE '' END) +
+              (CASE WHEN SABADO = 1 THEN ',S' ELSE '' END) +
+              (CASE WHEN DOMINGO = 1 THEN ',D' ELSE '' END),
               1, 1, ''
             ) AS dias
         FROM itm_horarios
-        WHERE ID_HORARIO IS NOT NULL AND INICIO IS NOT NULL AND FINAL IS NOT NULL AND TIPO = 'PRODUCTIVA'
-        GROUP BY ID_HORARIO
+        WHERE ID_HORARIO IS NOT NULL 
+          AND INICIO IS NOT NULL 
+          AND FINAL IS NOT NULL 
+          AND TIPO = 'PRODUCTIVA'
+        GROUP BY 
+            LTRIM(RTRIM(ID_HORARIO)),
+            LUNES, MARTES, MIERCOLES, JUEVES, VIERNES, SABADO, DOMINGO
       """);
       return results;
     } finally {
@@ -534,13 +555,26 @@ class SqlServerService {
     }
   }
 
-  /// Genera novedades de tipo SC (Sin Justa Causa) en el servidor central para una fecha dada
+  /// Genera novedades de tipo SC (Sin Justa Causa) en el servidor central para una fecha dada,
+  /// únicamente a empleados que debían laborar según su horario o que posean una programación especial.
   Future<void> autogenerarScEnServidor(String fecha) async {
     final connected = await connect();
     if (!connected) return;
 
     try {
-      print('[SqlServer] Autogenerando ausentismos SC para la fecha $fecha...');
+      final dateObj = DateTime.tryParse(fecha) ?? DateTime.now();
+      final dayColumn = switch (dateObj.weekday) {
+        1 => 'LUNES',
+        2 => 'MARTES',
+        3 => 'MIERCOLES',
+        4 => 'JUEVES',
+        5 => 'VIERNES',
+        6 => 'SABADO',
+        7 => 'DOMINGO',
+        _ => 'DOMINGO',
+      };
+
+      print('[SqlServer] Autogenerando ausentismos SC para la fecha $fecha ($dayColumn)...');
       final query = """
         INSERT INTO ausentismos (id, cedula_empleado, fecha, sigla_ausencia, observacion, fecha_registro_servidor)
         SELECT 
@@ -552,17 +586,42 @@ class SqlServerService {
             GETDATE()
         FROM empleados_asistencia ea
         WHERE ea.estado = 'ACTIVO'
+          AND (
+              -- 1. Posee una programación especial activa para esta fecha
+              EXISTS (
+                  SELECT 1 
+                  FROM programaciones_especiales pe 
+                  WHERE LTRIM(RTRIM(pe.cedula)) = LTRIM(RTRIM(ea.cedula)) 
+                    AND pe.fecha = '$fecha'
+              )
+              -- 2. O bien el día de la semana está habilitado en su turno activo del ERP
+              OR EXISTS (
+                  SELECT 1 
+                  FROM ITM_EMPLEADOS_TURNOS t 
+                  INNER JOIN itm_horarios h ON t.ID_HORARIO = h.ID_HORARIO
+                  WHERE LTRIM(RTRIM(t.ID_EMPLEADO)) = LTRIM(RTRIM(ea.cedula)) 
+                    AND t.ESTADO = 'ACTIVO' 
+                    AND CAST(h.$dayColumn AS INT) = 1
+              )
+              -- 3. O bien el día de la semana está habilitado en su horario predeterminado
+              OR EXISTS (
+                  SELECT 1 
+                  FROM itm_horarios h 
+                  WHERE LTRIM(RTRIM(h.ID_HORARIO)) = LTRIM(RTRIM(ea.horario_id)) 
+                    AND CAST(h.$dayColumn AS INT) = 1
+              )
+          )
           AND NOT EXISTS (
               SELECT 1 
               FROM registros_asistencia ra 
-              WHERE ra.cedula = ea.cedula 
+              WHERE LTRIM(RTRIM(ra.cedula)) = LTRIM(RTRIM(ea.cedula)) 
                 AND ra.evento = 'ENTRADA' 
                 AND CONVERT(VARCHAR(10), ra.fecha_hora, 120) = '$fecha'
           )
           AND NOT EXISTS (
               SELECT 1 
               FROM ausentismos a 
-              WHERE a.cedula_empleado = ea.cedula 
+              WHERE LTRIM(RTRIM(a.cedula_empleado)) = LTRIM(RTRIM(ea.cedula)) 
                 AND a.fecha = '$fecha'
           )
       """;
@@ -934,6 +993,228 @@ class SqlServerService {
       print('[SqlServer] Error al eliminar programaciones especiales en el servidor: $e');
       _isConnected = false;
       return false;
+    } finally {
+      await disconnect();
+    }
+  }
+
+  /// Obtiene los ausentismos (SC, V, I, P, etc.) registrados en el servidor central para una fecha dada
+  Future<List<Map<String, dynamic>>> obtenerAusentismosServidor(String fecha) async {
+    final connected = await connect();
+    if (!connected) return [];
+
+    try {
+      final results = await SqlConn.read(connectionId, """
+        SELECT 
+          LTRIM(RTRIM(cedula_empleado)) AS cedula,
+          CONVERT(VARCHAR(10), fecha, 120) AS date,
+          sigla_ausencia,
+          observacion
+        FROM ausentismos
+        WHERE CONVERT(VARCHAR(10), fecha, 120) = '$fecha'
+      """);
+
+      final List<Map<String, dynamic>> output = [];
+      for (final rawRow in results) {
+        final row = Map<String, dynamic>.from(rawRow);
+        output.add({
+          'cedula': row['cedula']?.toString().trim(),
+          'date': row['date']?.toString().trim(),
+          'sigla_ausencia': row['sigla_ausencia']?.toString().trim(),
+          'observacion': row['observacion']?.toString().trim(),
+        });
+      }
+      return output;
+    } catch (e) {
+      print('[SqlServer] Error al obtener ausentismos del servidor: $e');
+      return [];
+    } finally {
+      await disconnect();
+    }
+  }
+
+  /// Catálogo oficial de plantas de la empresa
+  static const Map<String, String> CATALOGO_PLANTAS = {
+    'PL01': 'PL01 - PLANTA DE COMPONENTES',
+    'PL02': 'PL02 - PLANTA DE ENSAMBLES',
+    'PL03': 'PL03 - PLANTA DE TERMINACIONES',
+    'PL04': 'PL04 - PLANTA TAPICERIA',
+    'PL05': 'PL05 - PLANTA DE MADERAS',
+    'PL06': 'PL06 - PLANTA DE METALMECANICA',
+  };
+
+  /// Obtiene la lista unificada de plantas/sedes disponibles
+  Future<List<Map<String, String>>> obtenerPlantasDisponibles() async {
+    final List<Map<String, String>> plantas = [];
+
+    // Agregar primero las plantas oficiales del catálogo
+    CATALOGO_PLANTAS.forEach((code, name) {
+      plantas.add({'code': code, 'name': name});
+    });
+
+    final connected = await connect();
+    if (connected) {
+      try {
+        final dbPlants = await SqlConn.read(connectionId, """
+          SELECT DISTINCT COALESCE(NULLIF(LTRIM(RTRIM(id_un_item)), ''), NULLIF(LTRIM(RTRIM(sede_principal)), '')) AS codigo_planta
+          FROM empleados_asistencia
+          WHERE (id_un_item IS NOT NULL AND LTRIM(RTRIM(id_un_item)) <> '')
+             OR (sede_principal IS NOT NULL AND LTRIM(RTRIM(sede_principal)) <> '')
+        """);
+
+        for (final rawRow in dbPlants) {
+          final code = rawRow['codigo_planta']?.toString().trim();
+          if (code != null && code.isNotEmpty && !plantas.any((p) => p['code'] == code)) {
+            final name = CATALOGO_PLANTAS[code] ?? code;
+            plantas.add({'code': code, 'name': name});
+          }
+        }
+      } catch (e) {
+        print('[SqlServer] Error al obtener plantas desde la BD: $e');
+      } finally {
+        await disconnect();
+      }
+    }
+
+    return plantas;
+  }
+
+  /// Obtiene el reporte diario consolidado por plantas para una fecha específica
+  Future<List<Map<String, dynamic>>> obtenerReporteDiarioPorPlantas({
+    required List<String> codigosPlantas,
+    required String fecha,
+  }) async {
+    final connected = await connect();
+    if (!connected) return [];
+
+    try {
+      String filtroPlantas = "";
+      if (codigosPlantas.isNotEmpty) {
+        final escaped = codigosPlantas.map((p) => "'${p.replaceAll("'", "''")}'").join(',');
+        filtroPlantas = " AND (ea.id_un_item IN ($escaped) OR ea.sede_principal IN ($escaped)) ";
+      }
+
+      final query = """
+        SELECT 
+            ea.cedula,
+            ea.nombre,
+            COALESCE(NULLIF(LTRIM(RTRIM(ea.nombre_seccion)), ''), 'ADMINISTRATIVO') AS seccion,
+            COALESCE(NULLIF(LTRIM(RTRIM(ea.id_un_item)), ''), NULLIF(LTRIM(RTRIM(ea.sede_principal)), ''), 'SIN PLANTA') AS planta,
+            COALESCE(turn.ID_HORARIO, ea.horario_id, '') AS horario_id,
+            MIN(CASE WHEN ra.evento = 'ENTRADA' THEN 
+                COALESCE(
+                    CONVERT(VARCHAR(5), TRY_CONVERT(DATETIME, ra.fecha_hora), 108),
+                    CASE WHEN LEN(ra.fecha_hora) >= 16 THEN SUBSTRING(ra.fecha_hora, 12, 5) ELSE ra.fecha_hora END
+                ) 
+            END) AS hora_entrada,
+            MAX(CASE WHEN ra.evento = 'SALIDA' THEN 
+                COALESCE(
+                    CONVERT(VARCHAR(5), TRY_CONVERT(DATETIME, ra.fecha_hora), 108),
+                    CASE WHEN LEN(ra.fecha_hora) >= 16 THEN SUBSTRING(ra.fecha_hora, 12, 5) ELSE ra.fecha_hora END
+                ) 
+            END) AS hora_salida,
+            MAX(CASE WHEN ra.evento = 'ENTRADA' THEN COALESCE(ra.duracion, '0') ELSE '0' END) AS minutos_retardo,
+            MAX(CASE WHEN ra.evento = 'ENTRADA' THEN ra.tipo END) AS tipo_marca,
+            aus.sigla_ausencia,
+            aus.observacion
+        FROM empleados_asistencia ea
+        LEFT JOIN registros_asistencia ra ON LTRIM(RTRIM(ea.cedula)) = LTRIM(RTRIM(ra.cedula)) 
+            AND (
+                ra.fecha_hora LIKE '$fecha%' 
+                OR CONVERT(VARCHAR(10), TRY_CONVERT(DATETIME, ra.fecha_hora), 120) = '$fecha'
+            )
+        LEFT JOIN ausentismos aus ON LTRIM(RTRIM(ea.cedula)) = LTRIM(RTRIM(aus.cedula_empleado)) 
+            AND aus.fecha = '$fecha'
+        LEFT JOIN (
+            SELECT t.ID_EMPLEADO, MAX(t.ID_HORARIO) AS ID_HORARIO
+            FROM ITM_EMPLEADOS_TURNOS t
+            INNER JOIN (
+                SELECT ID_EMPLEADO, MAX(FECHA) AS MAX_FECHA
+                FROM ITM_EMPLEADOS_TURNOS
+                WHERE ESTADO = 'ACTIVO'
+                GROUP BY ID_EMPLEADO
+            ) latest ON t.ID_EMPLEADO = latest.ID_EMPLEADO AND t.FECHA = latest.MAX_FECHA
+            GROUP BY t.ID_EMPLEADO
+        ) turn ON LTRIM(RTRIM(ea.cedula)) = turn.ID_EMPLEADO
+        WHERE ea.estado = 'ACTIVO' $filtroPlantas
+        GROUP BY 
+            ea.cedula, ea.nombre, ea.nombre_seccion, ea.id_un_item, ea.sede_principal, 
+            turn.ID_HORARIO, ea.horario_id, aus.sigla_ausencia, aus.observacion
+        ORDER BY planta ASC, ea.nombre ASC
+      """;
+
+      final results = await SqlConn.read(connectionId, query);
+      return results;
+    } catch (e) {
+      print('[SqlServer] Error al obtener reporte diario por plantas: $e');
+      return [];
+    } finally {
+      await disconnect();
+    }
+  }
+
+  /// Obtiene el reporte mensual consolidado por plantas para un mes y año específicos
+  Future<List<Map<String, dynamic>>> obtenerReporteMensualPorPlantas({
+    required List<String> codigosPlantas,
+    required int anio,
+    required int mes,
+  }) async {
+    final connected = await connect();
+    if (!connected) return [];
+
+    try {
+      final mesStr = mes.toString().padLeft(2, '0');
+      final diasEnMes = DateTime(anio, mes + 1, 0).day;
+      final fechaInicio = '$anio-$mesStr-01';
+      final fechaFin = '$anio-$mesStr-${diasEnMes.toString().padLeft(2, '0')}';
+
+      String filtroPlantas = "";
+      if (codigosPlantas.isNotEmpty) {
+        final escaped = codigosPlantas.map((p) => "'${p.replaceAll("'", "''")}'").join(',');
+        filtroPlantas = " AND (ea.id_un_item IN ($escaped) OR ea.sede_principal IN ($escaped)) ";
+      }
+
+      final query = """
+        SELECT 
+            ea.cedula,
+            ea.nombre,
+            COALESCE(NULLIF(LTRIM(RTRIM(ea.nombre_seccion)), ''), 'ADMINISTRATIVO') AS seccion,
+            COALESCE(NULLIF(LTRIM(RTRIM(ea.id_un_item)), ''), NULLIF(LTRIM(RTRIM(ea.sede_principal)), ''), 'SIN PLANTA') AS planta,
+            COALESCE(
+                CONVERT(VARCHAR(10), TRY_CONVERT(DATETIME, ra.fecha_hora), 120),
+                SUBSTRING(ra.fecha_hora, 1, 10)
+            ) AS fecha_marca,
+            ra.evento,
+            COALESCE(
+                CONVERT(VARCHAR(5), TRY_CONVERT(DATETIME, ra.fecha_hora), 108),
+                SUBSTRING(ra.fecha_hora, 12, 5)
+            ) AS hora,
+            ra.duracion,
+            ra.tipo AS tipo_marca,
+            aus.fecha AS fecha_ausencia,
+            aus.sigla_ausencia,
+            aus.observacion
+        FROM empleados_asistencia ea
+        LEFT JOIN registros_asistencia ra ON LTRIM(RTRIM(ea.cedula)) = LTRIM(RTRIM(ra.cedula)) 
+            AND (
+                ra.fecha_hora LIKE '$anio-$mesStr%'
+                OR (
+                    ra.fecha_hora >= '$fechaInicio 00:00:00' 
+                    AND ra.fecha_hora <= '$fechaFin 23:59:59'
+                )
+            )
+        LEFT JOIN ausentismos aus ON LTRIM(RTRIM(ea.cedula)) = LTRIM(RTRIM(aus.cedula_empleado)) 
+            AND aus.fecha >= '$fechaInicio' 
+            AND aus.fecha <= '$fechaFin'
+        WHERE ea.estado = 'ACTIVO' $filtroPlantas
+        ORDER BY planta ASC, ea.nombre ASC
+      """;
+
+      final results = await SqlConn.read(connectionId, query);
+      return results;
+    } catch (e) {
+      print('[SqlServer] Error al obtener reporte mensual por plantas: $e');
+      return [];
     } finally {
       await disconnect();
     }

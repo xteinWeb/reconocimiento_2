@@ -7,6 +7,7 @@ class Employee {
   final DateTime createdAt;
   final int isSynced;
   final String? idEmpresa;
+  final String? idUnItem;
 
   Employee({
     this.id,
@@ -17,6 +18,7 @@ class Employee {
     required this.createdAt,
     this.isSynced = 1,
     this.idEmpresa,
+    this.idUnItem,
   });
 
   Map<String, dynamic> toMap() {
@@ -29,6 +31,7 @@ class Employee {
       'created_at': createdAt.toIso8601String(),
       'is_synced': isSynced,
       'id_empresa': idEmpresa,
+      'id_un_item': idUnItem,
     };
   }
 
@@ -42,6 +45,7 @@ class Employee {
       createdAt: DateTime.parse(map['created_at'] as String),
       isSynced: map['is_synced'] as int? ?? 1,
       idEmpresa: map['id_empresa'] as String?,
+      idUnItem: map['id_un_item'] as String?,
     );
   }
 }

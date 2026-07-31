@@ -49,6 +49,9 @@ class _AbsenceScreenState extends State<AbsenceScreen>
     try {
       final dateStr = DateFormat('yyyy-MM-dd').format(_selectedDate);
 
+      // 0. Descargar ausentismos (SC y justificantes) del servidor para la fecha seleccionada
+      await _syncService.descargarAusentismosServidor(dateStr);
+
       // 1. Obtener empleados
       final emps = await _database.getAllEmployees();
 
@@ -60,8 +63,16 @@ class _AbsenceScreenState extends State<AbsenceScreen>
 
       // 4. Obtener tipos de ausencia dinámicos
       List<Map<String, dynamic>> types = await _database.getAllAbsenceTypes();
+      final hasSc = types.any((t) => t['sigla'].toString().toUpperCase() == 'SC');
+      if (!hasSc) {
+        types = [
+          {'sigla': 'SC', 'nombre': 'Sin Checado (Falta Sin Justa Causa)'},
+          ...types,
+        ];
+      }
       if (types.isEmpty) {
         types = [
+          {'sigla': 'SC', 'nombre': 'Sin Checado (Falta Sin Justa Causa)'},
           {'sigla': 'F', 'nombre': 'Falta Injustificada'},
           {'sigla': 'V', 'nombre': 'Vacaciones'},
           {'sigla': 'I', 'nombre': 'Incapacidad Médica'},
@@ -294,6 +305,8 @@ class _AbsenceScreenState extends State<AbsenceScreen>
 
   Color _getSiglaColor(String sigla) {
     switch (sigla.toUpperCase()) {
+      case 'SC':
+        return Colors.red.shade900;
       case 'F':
         return Colors.redAccent.shade700;
       case 'V':
@@ -319,6 +332,8 @@ class _AbsenceScreenState extends State<AbsenceScreen>
     }
 
     switch (sigla.toUpperCase()) {
+      case 'SC':
+        return 'SC - Sin Checado';
       case 'F':
         return 'Falta';
       case 'V':

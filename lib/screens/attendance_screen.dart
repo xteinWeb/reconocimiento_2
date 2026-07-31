@@ -232,14 +232,17 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             return;
           }
 
-          // 3. Validar marcación consecutiva
+          // 3. Validar marcación consecutiva (Entrada previa obligatoria para Salida)
           final lastRecord = await _database.getLastAttendanceForEmployee(
             employee.id!,
           );
+
+          bool isSameDay = false;
+          String? lastEvento;
+
           if (lastRecord != null) {
-            final String lastEvento = lastRecord['evento'] ?? '';
+            lastEvento = lastRecord['evento']?.toString();
             final String? lastTimestampStr = lastRecord['timestamp'];
-            bool isSameDay = false;
             if (lastTimestampStr != null) {
               final lastDateTime = DateTime.tryParse(lastTimestampStr);
               if (lastDateTime != null) {
@@ -249,10 +252,54 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                     lastDateTime.day == now.day;
               }
             }
+          }
 
-            if (lastEvento == selection && isSameDay) {
+          if (selection == 'SALIDA') {
+            final bool tieneEntradaPreviaHoy =
+                lastRecord != null && lastEvento == 'ENTRADA' && isSameDay;
+
+            if (!tieneEntradaPreviaHoy) {
               setState(() {
-                _status = "Registro inválido: Ya marcaste una $selection.";
+                _status = "Registro inválido: No has marcado entrada hoy.";
+                _scanState = ScanState.failure;
+              });
+
+              if (mounted) {
+                await showDialog(
+                  context: context,
+                  builder: (ctx) => AlertDialog(
+                    backgroundColor: const Color(0xFF2B3A24),
+                    title: const Text(
+                      'Entrada Requerida',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    content: const Text(
+                      'No se puede registrar SALIDA porque no tienes un registro de ENTRADA previo el día de hoy.\nDebes registrar tu ENTRADA primero.',
+                      style: TextStyle(color: Colors.white70),
+                    ),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.of(ctx).pop(),
+                        child: const Text(
+                          'Aceptar',
+                          style: TextStyle(color: Colors.amber),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              }
+
+              _resumeAutoTimerAfterDelay();
+              return;
+            }
+          } else if (selection == 'ENTRADA') {
+            final bool yaMarcoEntradaHoy =
+                lastRecord != null && lastEvento == 'ENTRADA' && isSameDay;
+
+            if (yaMarcoEntradaHoy) {
+              setState(() {
+                _status = "Registro inválido: Ya marcaste entrada hoy.";
                 _scanState = ScanState.failure;
               });
 
@@ -265,9 +312,9 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                       'Registro Duplicado',
                       style: TextStyle(color: Colors.white),
                     ),
-                    content: Text(
-                      'Ya registraste una $selection anteriormente.\nDebes registrar una ${selection == 'ENTRADA' ? 'SALIDA' : 'ENTRADA'} primero.',
-                      style: const TextStyle(color: Colors.white70),
+                    content: const Text(
+                      'Ya registraste una ENTRADA anteriormente el día de hoy.\nDebes registrar tu SALIDA primero.',
+                      style: TextStyle(color: Colors.white70),
                     ),
                     actions: [
                       TextButton(
@@ -420,7 +467,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       } else {
         Map<String, dynamic>? baseHorario;
         if (employee.horarioId != null) {
-          baseHorario = await _database.getScheduleById(employee.horarioId!);
+          baseHorario = await _database.getScheduleByIdAndDate(employee.horarioId!, now);
         }
         if (baseHorario != null) {
           final modHorario = Map<String, dynamic>.from(baseHorario);
@@ -442,13 +489,13 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     } else if (isSpecialDay) {
       Map<String, dynamic>? baseHorario;
       if (employee.horarioId != null) {
-        baseHorario = await _database.getScheduleById(employee.horarioId!);
+        baseHorario = await _database.getScheduleByIdAndDate(employee.horarioId!, now);
       }
       return (horario: baseHorario, isNotProgrammed: true);
     } else {
       Map<String, dynamic>? baseHorario;
       if (employee.horarioId != null) {
-        baseHorario = await _database.getScheduleById(employee.horarioId!);
+        baseHorario = await _database.getScheduleByIdAndDate(employee.horarioId!, now);
       }
       return (horario: baseHorario, isNotProgrammed: false);
     }
@@ -601,10 +648,13 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       final lastRecord = await _database.getLastAttendanceForEmployee(
         employee.id!,
       );
+
+      bool isSameDay = false;
+      String? lastEvento;
+
       if (lastRecord != null) {
-        final String lastEvento = lastRecord['evento'] ?? '';
+        lastEvento = lastRecord['evento']?.toString();
         final String? lastTimestampStr = lastRecord['timestamp'];
-        bool isSameDay = false;
         if (lastTimestampStr != null) {
           final lastDateTime = DateTime.tryParse(lastTimestampStr);
           if (lastDateTime != null) {
@@ -614,10 +664,55 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                 lastDateTime.day == now.day;
           }
         }
+      }
 
-        if (lastEvento == selection && isSameDay) {
+      if (selection == 'SALIDA') {
+        final bool tieneEntradaPreviaHoy =
+            lastRecord != null && lastEvento == 'ENTRADA' && isSameDay;
+
+        if (!tieneEntradaPreviaHoy) {
           setState(() {
-            _status = "Registro inválido: Ya marcaste una $selection.";
+            _status = "Registro inválido: No has marcado entrada hoy.";
+            _scanState = ScanState.failure;
+            _isProcessing = false;
+          });
+
+          if (mounted) {
+            await showDialog(
+              context: context,
+              builder: (ctx) => AlertDialog(
+                backgroundColor: const Color(0xFF2B3A24),
+                title: const Text(
+                  'Entrada Requerida',
+                  style: TextStyle(color: Colors.white),
+                ),
+                content: const Text(
+                  'No se puede registrar SALIDA porque no tienes un registro de ENTRADA previo el día de hoy.\nDebes registrar tu ENTRADA primero.',
+                  style: TextStyle(color: Colors.white70),
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(ctx).pop(),
+                    child: const Text(
+                      'Aceptar',
+                      style: TextStyle(color: Colors.amber),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }
+
+          _resumeAutoTimerAfterDelay();
+          return;
+        }
+      } else if (selection == 'ENTRADA') {
+        final bool yaMarcoEntradaHoy =
+            lastRecord != null && lastEvento == 'ENTRADA' && isSameDay;
+
+        if (yaMarcoEntradaHoy) {
+          setState(() {
+            _status = "Registro inválido: Ya marcaste entrada hoy.";
             _scanState = ScanState.failure;
             _isProcessing = false;
           });
@@ -631,9 +726,9 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                   'Registro Duplicado',
                   style: TextStyle(color: Colors.white),
                 ),
-                content: Text(
-                  'Ya registraste una $selection anteriormente.\nDebes registrar una ${selection == 'ENTRADA' ? 'SALIDA' : 'ENTRADA'} primero.',
-                  style: const TextStyle(color: Colors.white70),
+                content: const Text(
+                  'Ya registraste una ENTRADA anteriormente el día de hoy.\nDebes registrar tu SALIDA primero.',
+                  style: TextStyle(color: Colors.white70),
                 ),
                 actions: [
                   TextButton(

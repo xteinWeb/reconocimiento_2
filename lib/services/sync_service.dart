@@ -25,14 +25,15 @@ class SyncService {
     print('[Sync] Iniciando descarga de horarios desde SQL Server...');
     try {
       final remoteSchedules = await _sqlServer.obtenerHorariosServidor();
-      print('[Sync] Descargados ${remoteSchedules.length} horarios.');
+      print('[Sync] Descargados ${remoteSchedules.length} bloques de horarios.');
+      await _database.clearSchedules();
       for (final s in remoteSchedules) {
         if (s['id_horario'] != null) {
           await _database.saveSchedule({
             'id_horario': s['id_horario'].toString().trim(),
             'hora_inicio': s['hora_inicio']?.toString().trim() ?? '',
             'hora_final': s['hora_final']?.toString().trim() ?? '',
-            'tipo': s['tipo']?.toString().trim() ?? 'LABORAL',
+            'tipo': s['tipo']?.toString().trim() ?? 'PRODUCTIVA',
             'dias': s['dias']?.toString().trim() ?? '',
           });
         }
@@ -115,6 +116,11 @@ class SyncService {
       }
 
       final String? idEmpresa = row['id_empresa']?.toString().trim();
+      final String? rawIdUnItem = row['id_un_item']?.toString().trim();
+      final String? rawSede = row['sede_principal']?.toString().trim();
+      final String? idUnItem = (rawIdUnItem != null && rawIdUnItem.isNotEmpty)
+          ? rawIdUnItem
+          : ((rawSede != null && rawSede.isNotEmpty) ? rawSede : null);
 
       // Insertar o actualizar el empleado en SQLite local
       final employee = Employee(
@@ -125,6 +131,7 @@ class SyncService {
         createdAt: DateTime.now(),
         isSynced: isSynced,
         idEmpresa: idEmpresa != null && idEmpresa.isNotEmpty ? idEmpresa : null,
+        idUnItem: idUnItem,
       );
 
       final employeeId = await _insertOrUpdateEmployee(employee);
@@ -608,6 +615,34 @@ class SyncService {
       'success': successCount,
       'failed': failCount,
     };
+  }
+
+  /// Descarga los ausentismos (SC y justificantes) registrados en el servidor para una fecha específica y los guarda en SQLite
+  Future<void> descargarAusentismosServidor(String fecha) async {
+    try {
+      final remoteAbsences = await _sqlServer.obtenerAusentismosServidor(fecha);
+      print('[Sync] Descargados ${remoteAbsences.length} ausentismos del servidor para la fecha $fecha');
+
+      for (final ra in remoteAbsences) {
+        final String? cedula = ra['cedula'];
+        final String? sigla = ra['sigla_ausencia'];
+        final String? obs = ra['observacion'];
+        if (cedula != null && sigla != null) {
+          final emp = await _database.getEmployeeByCode(cedula);
+          if (emp != null && emp.id != null) {
+            await _database.saveAbsence(
+              emp.id!,
+              fecha,
+              sigla,
+              obs,
+              isSynced: 1,
+            );
+          }
+        }
+      }
+    } catch (e) {
+      print('[Sync] Error al descargar ausentismos del servidor: $e');
+    }
   }
 
   /// Dispara la autogeneración de LLT y SC en el servidor SQL Server central.
