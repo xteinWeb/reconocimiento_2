@@ -302,6 +302,24 @@ class DatabaseService {
     );
   }
 
+  Future<String?> getConfig(String key) async {
+    final db = await database;
+    final res = await db.query('system_config', where: 'key = ?', whereArgs: [key]);
+    if (res.isNotEmpty) {
+      return res.first['value'] as String;
+    }
+    return null;
+  }
+
+  Future<void> saveConfig(String key, String value) async {
+    final db = await database;
+    await db.insert(
+      'system_config',
+      {'key': key, 'value': value},
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
   // EMPLEADOS
   Future<int> insertEmployee(Employee employee) async {
     final db = await database;

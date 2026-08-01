@@ -22,6 +22,7 @@ class _DeviceConfigScreenState extends State<DeviceConfigScreen> {
   List<Map<String, dynamic>> _devices = [];
   bool _isLoading = false;
   String? _selectedDeviceId;
+  String _selectedIp = SqlServerService.ipPublica;
 
   @override
   void initState() {
@@ -31,9 +32,11 @@ class _DeviceConfigScreenState extends State<DeviceConfigScreen> {
 
   Future<void> _loadCurrentDevice() async {
     final devId = await _database.getDeviceId();
+    final customIp = await _database.getConfig('sql_server_ip');
     setState(() {
       _currentDeviceId = devId;
       _selectedDeviceId = devId;
+      _selectedIp = customIp ?? SqlServerService.ipPublica;
     });
   }
 
@@ -53,6 +56,16 @@ class _DeviceConfigScreenState extends State<DeviceConfigScreen> {
     } finally {
       setState(() => _isLoading = false);
     }
+  }
+
+  Future<void> _onIpChanged(String newIp) async {
+    setState(() {
+      _selectedIp = newIp;
+      _devices = [];
+    });
+    await _database.saveConfig('sql_server_ip', newIp);
+    await _sqlServer.disconnect();
+    await _fetchDevicesFromServer();
   }
 
   void _verifyPassword() {
@@ -220,6 +233,98 @@ class _DeviceConfigScreenState extends State<DeviceConfigScreen> {
                     ),
                   ],
                 ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+        // Conexión del Servidor
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: isDark ? AppColors.kioskSurface : Colors.white,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: isDark ? Colors.white10 : Colors.black12),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Conexión al Servidor SQL', style: TextStyle(fontSize: 12, color: Colors.grey)),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: InkWell(
+                      onTap: _isLoading ? null : () => _onIpChanged(SqlServerService.ipPublica),
+                      borderRadius: BorderRadius.circular(8),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+                        decoration: BoxDecoration(
+                          color: _selectedIp == SqlServerService.ipPublica
+                              ? AppColors.primary.withOpacity(0.1)
+                              : Colors.transparent,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: _selectedIp == SqlServerService.ipPublica
+                                ? AppColors.primary
+                                : (isDark ? Colors.white10 : Colors.black12),
+                            width: 1.5,
+                          ),
+                        ),
+                        child: Column(
+                          children: [
+                            Text(
+                              'IP Pública',
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13,
+                                color: _selectedIp == SqlServerService.ipPublica ? AppColors.primary : (isDark ? Colors.white : Colors.black87),
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(SqlServerService.ipPublica, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: InkWell(
+                      onTap: _isLoading ? null : () => _onIpChanged(SqlServerService.ipLocal),
+                      borderRadius: BorderRadius.circular(8),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+                        decoration: BoxDecoration(
+                          color: _selectedIp == SqlServerService.ipLocal
+                              ? AppColors.primary.withOpacity(0.1)
+                              : Colors.transparent,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: _selectedIp == SqlServerService.ipLocal
+                                ? AppColors.primary
+                                : (isDark ? Colors.white10 : Colors.black12),
+                            width: 1.5,
+                          ),
+                        ),
+                        child: Column(
+                          children: [
+                            Text(
+                              'IP Local',
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13,
+                                color: _selectedIp == SqlServerService.ipLocal ? AppColors.primary : (isDark ? Colors.white : Colors.black87),
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(SqlServerService.ipLocal, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ],
           ),

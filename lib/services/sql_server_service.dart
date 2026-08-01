@@ -1,9 +1,11 @@
 import 'dart:convert';
 import 'package:sql_conn/sql_conn.dart';
+import 'database_service.dart';
 
 class SqlServerService {
   final String connectionId = 'mainDB';
-  final String ip = '190.85.54.78';
+  static const String ipPublica = '190.85.54.78';
+  static const String ipLocal = '192.168.10.108';
   final int port = 9788;
   final String dbname = 'ARTDECOM';
   final String username = 'sa';
@@ -16,10 +18,12 @@ class SqlServerService {
       if (_isConnected) {
         return true;
       }
-      print('[SqlServer] Conectando a $ip:$port/$dbname...');
+      final customIp = await DatabaseService().getConfig('sql_server_ip');
+      final ipToUse = customIp ?? ipPublica;
+      print('[SqlServer] Conectando a $ipToUse:$port/$dbname...');
       final success = await SqlConn.connect(
         connectionId: connectionId,
-        host: ip,
+        host: ipToUse,
         port: port,
         database: dbname,
         username: username,
