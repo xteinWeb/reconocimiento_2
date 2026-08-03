@@ -166,10 +166,30 @@ class SqlServerService {
            OR nombre_seccion IS NULL OR LTRIM(RTRIM(nombre_seccion)) = ''
       """);
 
+      // Actualizar 'horario_id' en 'empleados_asistencia' desde el turno activo de 'ITM_EMPLEADOS_TURNOS'
+      print('[SqlServer] Actualizando horario_id en empleados_asistencia...');
+      await SqlConn.write(connectionId, """
+        UPDATE ea
+        SET ea.horario_id = turn.ID_HORARIO
+        FROM empleados_asistencia ea
+        INNER JOIN (
+            SELECT LTRIM(RTRIM(t.ID_EMPLEADO)) AS ID_EMPLEADO, MAX(t.ID_HORARIO) AS ID_HORARIO
+            FROM ITM_EMPLEADOS_TURNOS t
+            INNER JOIN (
+                SELECT LTRIM(RTRIM(ID_EMPLEADO)) AS ID_EMPLEADO, MAX(FECHA) AS MAX_FECHA
+                FROM ITM_EMPLEADOS_TURNOS
+                WHERE ESTADO = 'ACTIVO'
+                GROUP BY LTRIM(RTRIM(ID_EMPLEADO))
+            ) latest ON LTRIM(RTRIM(t.ID_EMPLEADO)) = latest.ID_EMPLEADO AND t.FECHA = latest.MAX_FECHA
+            GROUP BY LTRIM(RTRIM(t.ID_EMPLEADO))
+        ) turn ON LTRIM(RTRIM(ea.cedula)) = turn.ID_EMPLEADO
+        WHERE ea.horario_id IS NULL OR ea.horario_id <> turn.ID_HORARIO
+      """);
+
       // 3. Insertar nuevos empleados activos en 'empleados_asistencia'
       print('[SqlServer] Insertando nuevos empleados...');
       await SqlConn.write(connectionId, """
-        INSERT INTO empleados_asistencia (cedula, nombre, estado, fecha_creacion, id_empresa, id_seccion, nombre_seccion, sede_principal, id_un_item, tipo)
+        INSERT INTO empleados_asistencia (cedula, nombre, estado, fecha_creacion, id_empresa, id_seccion, nombre_seccion, sede_principal, id_un_item, tipo, horario_id)
         SELECT 
             emp.ID_EMPLEADO,
             LTRIM(RTRIM(
@@ -185,7 +205,8 @@ class SqlServerService {
             COALESCE(NULLIF(LTRIM(RTRIM(sec.DESCRIPCION)), ''), 'ADMINISTRATIVO'),
             COALESCE(sec.ID_UN_ITEM, emp.ID_UN_ITEM),
             COALESCE(sec.ID_UN_ITEM, emp.ID_UN_ITEM),
-            ies.ID_ACTIVIDAD
+            ies.ID_ACTIVIDAD,
+            COALESCE(turn.ID_HORARIO, '')
         FROM empleados emp
         INNER JOIN IDENTIFICACIONES_LEGALES il ON emp.ID_LEGAL = il.ID_LEGAL
         LEFT JOIN (
@@ -195,6 +216,17 @@ class SqlServerService {
             GROUP BY LTRIM(RTRIM(ID_EMPLEADO)), ID_UN
         ) ies ON LTRIM(RTRIM(emp.ID_EMPLEADO)) = ies.ID_EMPLEADO AND COALESCE(emp.ID_UN, '00') = ies.ID_UN
         LEFT JOIN secciones sec ON LTRIM(RTRIM(ies.ID_SECCION)) = LTRIM(RTRIM(sec.ID_SECCION)) AND (sec.ID_UN = ies.ID_UN OR sec.ID_UN = '00')
+        LEFT JOIN (
+            SELECT LTRIM(RTRIM(t.ID_EMPLEADO)) AS ID_EMPLEADO, MAX(t.ID_HORARIO) AS ID_HORARIO
+            FROM ITM_EMPLEADOS_TURNOS t
+            INNER JOIN (
+                SELECT LTRIM(RTRIM(ID_EMPLEADO)) AS ID_EMPLEADO, MAX(FECHA) AS MAX_FECHA
+                FROM ITM_EMPLEADOS_TURNOS
+                WHERE ESTADO = 'ACTIVO'
+                GROUP BY LTRIM(RTRIM(ID_EMPLEADO))
+            ) latest ON LTRIM(RTRIM(t.ID_EMPLEADO)) = latest.ID_EMPLEADO AND t.FECHA = latest.MAX_FECHA
+            GROUP BY LTRIM(RTRIM(t.ID_EMPLEADO))
+        ) turn ON LTRIM(RTRIM(emp.ID_EMPLEADO)) = turn.ID_EMPLEADO
         WHERE COALESCE(emp.ESTADO, 'ACTIVO') = 'ACTIVO'
           AND emp.ID_EMPLEADO NOT IN (SELECT cedula FROM empleados_asistencia)
       """);
@@ -239,15 +271,15 @@ class SqlServerService {
         ) ies ON COALESCE(LTRIM(RTRIM(emp.ID_EMPLEADO)), LTRIM(RTRIM(ea.cedula))) = ies.ID_EMPLEADO AND COALESCE(emp.ID_UN, '00') = ies.ID_UN
         LEFT JOIN secciones sec ON LTRIM(RTRIM(ies.ID_SECCION)) = LTRIM(RTRIM(sec.ID_SECCION)) AND (sec.ID_UN = ies.ID_UN OR sec.ID_UN = '00')
         LEFT JOIN (
-            SELECT t.ID_EMPLEADO, MAX(t.ID_HORARIO) AS ID_HORARIO
+            SELECT LTRIM(RTRIM(t.ID_EMPLEADO)) AS ID_EMPLEADO, MAX(t.ID_HORARIO) AS ID_HORARIO
             FROM ITM_EMPLEADOS_TURNOS t
             INNER JOIN (
-                SELECT ID_EMPLEADO, MAX(FECHA) AS MAX_FECHA
+                SELECT LTRIM(RTRIM(ID_EMPLEADO)) AS ID_EMPLEADO, MAX(FECHA) AS MAX_FECHA
                 FROM ITM_EMPLEADOS_TURNOS
                 WHERE ESTADO = 'ACTIVO'
-                GROUP BY ID_EMPLEADO
-            ) latest ON t.ID_EMPLEADO = latest.ID_EMPLEADO AND t.FECHA = latest.MAX_FECHA
-            GROUP BY t.ID_EMPLEADO
+                GROUP BY LTRIM(RTRIM(ID_EMPLEADO))
+            ) latest ON LTRIM(RTRIM(t.ID_EMPLEADO)) = latest.ID_EMPLEADO AND t.FECHA = latest.MAX_FECHA
+            GROUP BY LTRIM(RTRIM(t.ID_EMPLEADO))
         ) turn ON COALESCE(LTRIM(RTRIM(emp.ID_EMPLEADO)), LTRIM(RTRIM(ea.cedula))) = turn.ID_EMPLEADO
         WHERE COALESCE(emp.ESTADO, ea.estado, 'ACTIVO') = 'ACTIVO'
       """);
@@ -680,8 +712,48 @@ class SqlServerService {
             ultima_sincronizacion DATETIME NOT NULL
         )
       """);
+
+      // Tabla de control de versiones de aplicación
+      await SqlConn.write(connectionId, """
+        IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='control_versiones' AND xtype='U')
+        BEGIN
+          CREATE TABLE control_versiones (
+              version_code INT PRIMARY KEY,
+              version_name VARCHAR(100) NOT NULL,
+              url_apk VARCHAR(500) NOT NULL,
+              fecha_actualizacion DATETIME DEFAULT GETDATE()
+          );
+          
+          -- Insertar versión semilla 1.0.0 (version_code = 1)
+          INSERT INTO control_versiones (version_code, version_name, url_apk) 
+          VALUES (1, '1.0.0', 'https://drive.google.com/file/d/1A2B3C4D5E6F7G8H9I0J/view?usp=sharing');
+        END
+      """);
     } catch (e) {
       print('[SqlServer] Error al asegurar tablas de tótems en el servidor: $e');
+    } finally {
+      await disconnect();
+    }
+  }
+
+  /// Obtiene los detalles de la versión más reciente configurada en SQL Server
+  Future<Map<String, dynamic>?> obtenerVersionMasReciente() async {
+    final connected = await connect();
+    if (!connected) return null;
+
+    try {
+      print('[SqlServer] Consultando versión más reciente de la app...');
+      final results = await SqlConn.read(
+        connectionId,
+        "SELECT TOP 1 version_code, version_name, url_apk FROM control_versiones ORDER BY version_code DESC",
+      );
+      if (results.isNotEmpty) {
+        return results.first;
+      }
+      return null;
+    } catch (e) {
+      print('[SqlServer] Error al consultar versión más reciente: $e');
+      return null;
     } finally {
       await disconnect();
     }
@@ -1130,15 +1202,15 @@ class SqlServerService {
         LEFT JOIN ausentismos aus ON LTRIM(RTRIM(ea.cedula)) = LTRIM(RTRIM(aus.cedula_empleado)) 
             AND aus.fecha = '$fecha'
         LEFT JOIN (
-            SELECT t.ID_EMPLEADO, MAX(t.ID_HORARIO) AS ID_HORARIO
+            SELECT LTRIM(RTRIM(t.ID_EMPLEADO)) AS ID_EMPLEADO, MAX(t.ID_HORARIO) AS ID_HORARIO
             FROM ITM_EMPLEADOS_TURNOS t
             INNER JOIN (
-                SELECT ID_EMPLEADO, MAX(FECHA) AS MAX_FECHA
+                SELECT LTRIM(RTRIM(ID_EMPLEADO)) AS ID_EMPLEADO, MAX(FECHA) AS MAX_FECHA
                 FROM ITM_EMPLEADOS_TURNOS
                 WHERE ESTADO = 'ACTIVO'
-                GROUP BY ID_EMPLEADO
-            ) latest ON t.ID_EMPLEADO = latest.ID_EMPLEADO AND t.FECHA = latest.MAX_FECHA
-            GROUP BY t.ID_EMPLEADO
+                GROUP BY LTRIM(RTRIM(ID_EMPLEADO))
+            ) latest ON LTRIM(RTRIM(t.ID_EMPLEADO)) = latest.ID_EMPLEADO AND t.FECHA = latest.MAX_FECHA
+            GROUP BY LTRIM(RTRIM(t.ID_EMPLEADO))
         ) turn ON LTRIM(RTRIM(ea.cedula)) = turn.ID_EMPLEADO
         WHERE ea.estado = 'ACTIVO' $filtroPlantas
         GROUP BY 
@@ -1219,6 +1291,60 @@ class SqlServerService {
     } catch (e) {
       print('[SqlServer] Error al obtener reporte mensual por plantas: $e');
       return [];
+    } finally {
+      await disconnect();
+    }
+  }
+
+  /// Inserta una nueva versión de la aplicación en la tabla de control de versiones
+  Future<bool> publicarNuevaVersion({
+    required int versionCode,
+    required String versionName,
+    required String urlApk,
+  }) async {
+    final connected = await connect();
+    if (!connected) return false;
+
+    try {
+      print('[SqlServer] Publicando nueva versión: $versionName ($versionCode)...');
+      final safeUrl = urlApk.replaceAll("'", "''").trim();
+      final safeName = versionName.replaceAll("'", "''").trim();
+      
+      await SqlConn.write(connectionId, """
+        INSERT INTO control_versiones (version_code, version_name, url_apk, fecha_actualizacion)
+        VALUES ($versionCode, '$safeName', '$safeUrl', GETDATE())
+      """);
+      return true;
+    } catch (e) {
+      print('[SqlServer] Error al publicar versión en base de datos: $e');
+      return false;
+    } finally {
+      await disconnect();
+    }
+  }
+
+  /// Obtiene el último registro de asistencia de hoy para una cédula en SQL Server
+  Future<Map<String, dynamic>?> obtenerUltimoRegistroHoy(String cedula) async {
+    final connected = await connect();
+    if (!connected) return null;
+
+    try {
+      final now = DateTime.now();
+      final fechaHoy = "${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}";
+      final results = await SqlConn.read(connectionId, """
+        SELECT TOP 1 evento, fecha_hora 
+        FROM registros_asistencia 
+        WHERE LTRIM(RTRIM(cedula)) = LTRIM(RTRIM('$cedula'))
+          AND fecha_hora >= '$fechaHoy 00:00:00'
+        ORDER BY fecha_hora DESC
+      """);
+      if (results.isNotEmpty) {
+        return results.first;
+      }
+      return null;
+    } catch (e) {
+      print('[SqlServer] Error al obtener ultimo registro de hoy: $e');
+      return null;
     } finally {
       await disconnect();
     }

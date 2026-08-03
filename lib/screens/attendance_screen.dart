@@ -30,6 +30,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   final _sqlServer = SqlServerService();
   final _syncService = SyncService();
 
+  double _threshold = 0.35;
+  int _minFaceSize = 130;
+  double _centerTolerance = 0.15;
+
   String _status = "Mira a la cámara para marcar";
   String _lightStatus = "";
   Color _lightColor = Colors.grey;
@@ -49,6 +53,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   }
 
   Future<void> _initialize() async {
+    await _loadConfigs();
     await _cameraService.initialize();
     await _faceRecognition.initialize();
     if (mounted) {
@@ -57,6 +62,142 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         _startAutoTimer();
       }
     }
+  }
+
+  Future<void> _loadConfigs() async {
+    try {
+      final tStr = await _database.getConfig('recognition_threshold');
+      final sStr = await _database.getConfig('min_face_size');
+      final cStr = await _database.getConfig('center_tolerance');
+
+      setState(() {
+        if (tStr != null) _threshold = double.tryParse(tStr) ?? 0.35;
+        if (sStr != null) _minFaceSize = int.tryParse(sStr) ?? 130;
+        if (cStr != null) _centerTolerance = double.tryParse(cStr) ?? 0.15;
+      });
+    } catch (e) {
+      debugPrint("Error al cargar configuraciones: $e");
+    }
+  }
+
+  Future<bool> _validarFlujoMarcacion(
+    Employee employee,
+    String selection,
+    DateTime now,
+  ) async {
+    Map<String, dynamic>? lastRecord;
+    bool isSameDay = false;
+    String? lastEvento;
+
+    // Intentar obtener el último registro global de hoy desde SQL Server
+    try {
+      lastRecord = await _sqlServer.obtenerUltimoRegistroHoy(employee.employeeCode);
+      if (lastRecord != null) {
+        isSameDay = true;
+        lastEvento = lastRecord['evento']?.toString();
+        print('[SyncFlow] Estado global desde SQL Server: $lastEvento');
+      }
+    } catch (e) {
+      print('[SyncFlow] Error al verificar flujo en servidor, usando SQLite local: $e');
+    }
+
+    // Si falló la consulta o no retornó nada, usar local SQLite
+    if (lastEvento == null) {
+      final localRecord = await _database.getLastAttendanceForEmployee(employee.id!);
+      if (localRecord != null) {
+        lastEvento = localRecord['evento']?.toString();
+        final String? lastTimestampStr = localRecord['timestamp'];
+        if (lastTimestampStr != null) {
+          final lastDateTime = DateTime.tryParse(lastTimestampStr);
+          if (lastDateTime != null) {
+            isSameDay =
+                lastDateTime.year == now.year &&
+                lastDateTime.month == now.month &&
+                lastDateTime.day == now.day;
+          }
+        }
+        if (isSameDay) {
+          print('[SyncFlow] Estado local desde SQLite: $lastEvento');
+        }
+      }
+    }
+
+    bool isValid = true;
+    String errorTitle = '';
+    String errorMsg = '';
+
+    if (selection == 'SALIDA') {
+      final bool tieneEntradaPreviaHoy =
+          lastRecord != null &&
+          (lastEvento == 'ENTRADA' || lastEvento == 'ENTRADA_TRASLADO') &&
+          isSameDay;
+
+      if (!tieneEntradaPreviaHoy) {
+        isValid = false;
+        errorTitle = 'Entrada Requerida';
+        errorMsg =
+            'No se puede registrar SALIDA porque no tienes un registro de ENTRADA previo el día de hoy.\nDebes registrar tu ENTRADA primero.';
+      }
+    } else if (selection == 'SALIDA_TRASLADO') {
+      final bool tieneEntradaPreviaHoy =
+          lastRecord != null &&
+          (lastEvento == 'ENTRADA' || lastEvento == 'ENTRADA_TRASLADO') &&
+          isSameDay;
+
+      if (!tieneEntradaPreviaHoy) {
+        isValid = false;
+        errorTitle = 'Entrada Requerida';
+        errorMsg =
+            'No se puede registrar SALIDA POR TRASLADO porque no tienes un registro de ENTRADA previo el día de hoy.';
+      }
+    } else if (selection == 'ENTRADA') {
+      final bool yaTieneEntradaActiva =
+          lastRecord != null &&
+          (lastEvento == 'ENTRADA' || lastEvento == 'ENTRADA_TRASLADO') &&
+          isSameDay;
+
+      if (yaTieneEntradaActiva) {
+        isValid = false;
+        errorTitle = 'Registro Duplicado';
+        errorMsg =
+            'Ya registraste una ENTRADA anteriormente el día de hoy.\nDebes registrar tu SALIDA primero.';
+      }
+    } else if (selection == 'ENTRADA_TRASLADO') {
+      final bool vieneDeTraslado =
+          lastRecord != null && lastEvento == 'SALIDA_TRASLADO' && isSameDay;
+
+      if (!vieneDeTraslado) {
+        isValid = false;
+        errorTitle = 'Traslado no Iniciado';
+        errorMsg =
+            'Para marcar ENTRADA POR TRASLADO, primero debes haber registrado una SALIDA POR TRASLADO en la sede de origen.';
+      }
+    }
+
+    if (!isValid && mounted) {
+      await showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: const Color(0xFF2B3A24),
+          title: Text(errorTitle, style: const TextStyle(color: Colors.white)),
+          content: Text(
+            errorMsg,
+            style: const TextStyle(color: Colors.white70),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text(
+                'Aceptar',
+                style: TextStyle(color: Colors.amber),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return isValid;
   }
 
   void _startAutoTimer() {
@@ -99,10 +240,30 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         return;
       }
 
-      final detection = await _faceDetection.detectFace(file.path);
+      final detection = await _faceDetection.detectFace(
+        file.path,
+        minFaceSize: _minFaceSize,
+        centerTolerancePercentage: _centerTolerance,
+      );
       if (detection == null) {
         setState(() {
           _status = "Buscando rostro...";
+          _isProcessing = false;
+        });
+        return;
+      }
+
+      if (detection.isNotCentered) {
+        setState(() {
+          _status = "⚠️ Por favor, centra tu rostro en el círculo.";
+          _isProcessing = false;
+        });
+        return;
+      }
+
+      if (detection.isTooSmall) {
+        setState(() {
+          _status = "⚠️ Por favor, acércate más a la pantalla.";
           _isProcessing = false;
         });
         return;
@@ -163,9 +324,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       debugPrint(
         '[FaceRecognition] ID detectado: $matchedId, Distancia calculada: ${distance.toStringAsFixed(4)}',
       );
-      const threshold = 0.35;
 
-      if (distance < threshold && matchedId != null) {
+      if (distance < _threshold && matchedId != null) {
         final employee = await _database.getEmployeeById(matchedId);
         if (employee != null) {
           // 1. Pausar el temporizador automático temporalmente para no acumular fotos
@@ -233,105 +393,18 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           }
 
           // 3. Validar marcación consecutiva (Entrada previa obligatoria para Salida)
-          final lastRecord = await _database.getLastAttendanceForEmployee(
-            employee.id!,
+          final isValid = await _validarFlujoMarcacion(
+            employee,
+            selection,
+            now,
           );
-
-          bool isSameDay = false;
-          String? lastEvento;
-
-          if (lastRecord != null) {
-            lastEvento = lastRecord['evento']?.toString();
-            final String? lastTimestampStr = lastRecord['timestamp'];
-            if (lastTimestampStr != null) {
-              final lastDateTime = DateTime.tryParse(lastTimestampStr);
-              if (lastDateTime != null) {
-                isSameDay =
-                    lastDateTime.year == now.year &&
-                    lastDateTime.month == now.month &&
-                    lastDateTime.day == now.day;
-              }
-            }
-          }
-
-          if (selection == 'SALIDA') {
-            final bool tieneEntradaPreviaHoy =
-                lastRecord != null && lastEvento == 'ENTRADA' && isSameDay;
-
-            if (!tieneEntradaPreviaHoy) {
-              setState(() {
-                _status = "Registro inválido: No has marcado entrada hoy.";
-                _scanState = ScanState.failure;
-              });
-
-              if (mounted) {
-                await showDialog(
-                  context: context,
-                  builder: (ctx) => AlertDialog(
-                    backgroundColor: const Color(0xFF2B3A24),
-                    title: const Text(
-                      'Entrada Requerida',
-                      style: TextStyle(color: Colors.white),
-                    ),
-                    content: const Text(
-                      'No se puede registrar SALIDA porque no tienes un registro de ENTRADA previo el día de hoy.\nDebes registrar tu ENTRADA primero.',
-                      style: TextStyle(color: Colors.white70),
-                    ),
-                    actions: [
-                      TextButton(
-                        onPressed: () => Navigator.of(ctx).pop(),
-                        child: const Text(
-                          'Aceptar',
-                          style: TextStyle(color: Colors.amber),
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              }
-
-              _resumeAutoTimerAfterDelay();
-              return;
-            }
-          } else if (selection == 'ENTRADA') {
-            final bool yaMarcoEntradaHoy =
-                lastRecord != null && lastEvento == 'ENTRADA' && isSameDay;
-
-            if (yaMarcoEntradaHoy) {
-              setState(() {
-                _status = "Registro inválido: Ya marcaste entrada hoy.";
-                _scanState = ScanState.failure;
-              });
-
-              if (mounted) {
-                await showDialog(
-                  context: context,
-                  builder: (ctx) => AlertDialog(
-                    backgroundColor: const Color(0xFF2B3A24),
-                    title: const Text(
-                      'Registro Duplicado',
-                      style: TextStyle(color: Colors.white),
-                    ),
-                    content: const Text(
-                      'Ya registraste una ENTRADA anteriormente el día de hoy.\nDebes registrar tu SALIDA primero.',
-                      style: TextStyle(color: Colors.white70),
-                    ),
-                    actions: [
-                      TextButton(
-                        onPressed: () => Navigator.of(ctx).pop(),
-                        child: const Text(
-                          'Aceptar',
-                          style: TextStyle(color: Colors.amber),
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              }
-
-              _resumeAutoTimerAfterDelay();
-              return;
-            }
+          if (!isValid) {
+            setState(() {
+              _status = "Registro inválido para el flujo actual.";
+              _scanState = ScanState.failure;
+            });
+            _resumeAutoTimerAfterDelay();
+            return;
           }
 
           // 4. Calcular retardo si es ENTRADA o si es salida temprana / no programado
@@ -342,9 +415,18 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           if (isNotProgrammed) {
             tipoFinal = 'NO_PROGRAMADO';
             duracionRetardo = null;
-            feedbackMsg = selection == 'ENTRADA'
+            feedbackMsg =
+                (selection == 'ENTRADA' || selection == 'ENTRADA_TRASLADO')
                 ? 'Entrada registrada — No estabas programado hoy.'
                 : 'Salida registrada — No estabas programado hoy.';
+          } else if (selection == 'ENTRADA_TRASLADO') {
+            tipoFinal = 'TRASLADO';
+            duracionRetardo = null;
+            feedbackMsg = 'Entrada por traslado registrada con éxito.';
+          } else if (selection == 'SALIDA_TRASLADO') {
+            tipoFinal = 'TRASLADO';
+            duracionRetardo = null;
+            feedbackMsg = 'Salida por traslado registrada. ¡Buen viaje!';
           } else if (selection == 'ENTRADA') {
             final validation = ScheduleValidator.validarMarcacion(horario, now);
             tipoFinal = validation.tipo;
@@ -352,7 +434,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             feedbackMsg = validation.descripcion;
           } else {
             // Verificar si es salida temprana
-            if (horario != null && ScheduleValidator.esSalidaTemprana(horario, now)) {
+            if (horario != null &&
+                ScheduleValidator.esSalidaTemprana(horario, now)) {
               tipoFinal = 'SALIDA_TEMPRANA';
               feedbackMsg = 'Salida anticipada registrada.';
             } else {
@@ -441,19 +524,23 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     });
   }
 
-  Future<({Map<String, dynamic>? horario, bool isNotProgrammed})> _resolveEffectiveSchedule(
-    Employee employee,
-    DateTime now,
-  ) async {
+  Future<({Map<String, dynamic>? horario, bool isNotProgrammed})>
+  _resolveEffectiveSchedule(Employee employee, DateTime now) async {
     final dateStr = DateFormat('yyyy-MM-dd').format(now);
-    final specialSchedule = await _database.getSpecialScheduleForEmployee(employee.id!, dateStr);
+    final specialSchedule = await _database.getSpecialScheduleForEmployee(
+      employee.id!,
+      dateStr,
+    );
     final isSpecialDay = await _database.hasAnySpecialScheduleOnDate(dateStr);
 
     if (specialSchedule != null) {
       final hInicio = specialSchedule['hora_inicio']?.toString();
       final hFinal = specialSchedule['hora_final']?.toString();
 
-      if (hInicio != null && hInicio.isNotEmpty && hFinal != null && hFinal.isNotEmpty) {
+      if (hInicio != null &&
+          hInicio.isNotEmpty &&
+          hFinal != null &&
+          hFinal.isNotEmpty) {
         return (
           horario: {
             'id_horario': 'ESPECIAL',
@@ -467,7 +554,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       } else {
         Map<String, dynamic>? baseHorario;
         if (employee.horarioId != null) {
-          baseHorario = await _database.getScheduleByIdAndDate(employee.horarioId!, now);
+          baseHorario = await _database.getScheduleByIdAndDate(
+            employee.horarioId!,
+            now,
+          );
         }
         if (baseHorario != null) {
           final modHorario = Map<String, dynamic>.from(baseHorario);
@@ -489,13 +579,19 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     } else if (isSpecialDay) {
       Map<String, dynamic>? baseHorario;
       if (employee.horarioId != null) {
-        baseHorario = await _database.getScheduleByIdAndDate(employee.horarioId!, now);
+        baseHorario = await _database.getScheduleByIdAndDate(
+          employee.horarioId!,
+          now,
+        );
       }
       return (horario: baseHorario, isNotProgrammed: true);
     } else {
       Map<String, dynamic>? baseHorario;
       if (employee.horarioId != null) {
-        baseHorario = await _database.getScheduleByIdAndDate(employee.horarioId!, now);
+        baseHorario = await _database.getScheduleByIdAndDate(
+          employee.horarioId!,
+          now,
+        );
       }
       return (horario: baseHorario, isNotProgrammed: false);
     }
@@ -645,107 +741,16 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         return;
       }
 
-      final lastRecord = await _database.getLastAttendanceForEmployee(
-        employee.id!,
-      );
-
-      bool isSameDay = false;
-      String? lastEvento;
-
-      if (lastRecord != null) {
-        lastEvento = lastRecord['evento']?.toString();
-        final String? lastTimestampStr = lastRecord['timestamp'];
-        if (lastTimestampStr != null) {
-          final lastDateTime = DateTime.tryParse(lastTimestampStr);
-          if (lastDateTime != null) {
-            isSameDay =
-                lastDateTime.year == now.year &&
-                lastDateTime.month == now.month &&
-                lastDateTime.day == now.day;
-          }
-        }
-      }
-
-      if (selection == 'SALIDA') {
-        final bool tieneEntradaPreviaHoy =
-            lastRecord != null && lastEvento == 'ENTRADA' && isSameDay;
-
-        if (!tieneEntradaPreviaHoy) {
-          setState(() {
-            _status = "Registro inválido: No has marcado entrada hoy.";
-            _scanState = ScanState.failure;
-            _isProcessing = false;
-          });
-
-          if (mounted) {
-            await showDialog(
-              context: context,
-              builder: (ctx) => AlertDialog(
-                backgroundColor: const Color(0xFF2B3A24),
-                title: const Text(
-                  'Entrada Requerida',
-                  style: TextStyle(color: Colors.white),
-                ),
-                content: const Text(
-                  'No se puede registrar SALIDA porque no tienes un registro de ENTRADA previo el día de hoy.\nDebes registrar tu ENTRADA primero.',
-                  style: TextStyle(color: Colors.white70),
-                ),
-                actions: [
-                  TextButton(
-                    onPressed: () => Navigator.of(ctx).pop(),
-                    child: const Text(
-                      'Aceptar',
-                      style: TextStyle(color: Colors.amber),
-                    ),
-                  ),
-                ],
-              ),
-            );
-          }
-
-          _resumeAutoTimerAfterDelay();
-          return;
-        }
-      } else if (selection == 'ENTRADA') {
-        final bool yaMarcoEntradaHoy =
-            lastRecord != null && lastEvento == 'ENTRADA' && isSameDay;
-
-        if (yaMarcoEntradaHoy) {
-          setState(() {
-            _status = "Registro inválido: Ya marcaste entrada hoy.";
-            _scanState = ScanState.failure;
-            _isProcessing = false;
-          });
-
-          if (mounted) {
-            await showDialog(
-              context: context,
-              builder: (ctx) => AlertDialog(
-                backgroundColor: const Color(0xFF2B3A24),
-                title: const Text(
-                  'Registro Duplicado',
-                  style: TextStyle(color: Colors.white),
-                ),
-                content: const Text(
-                  'Ya registraste una ENTRADA anteriormente el día de hoy.\nDebes registrar tu SALIDA primero.',
-                  style: TextStyle(color: Colors.white70),
-                ),
-                actions: [
-                  TextButton(
-                    onPressed: () => Navigator.of(ctx).pop(),
-                    child: const Text(
-                      'Aceptar',
-                      style: TextStyle(color: Colors.amber),
-                    ),
-                  ),
-                ],
-              ),
-            );
-          }
-
-          _resumeAutoTimerAfterDelay();
-          return;
-        }
+      // 3. Validar marcación consecutiva (Entrada previa obligatoria para Salida)
+      final isValid = await _validarFlujoMarcacion(employee, selection, now);
+      if (!isValid) {
+        setState(() {
+          _status = "Registro inválido para el flujo actual.";
+          _scanState = ScanState.failure;
+          _isProcessing = false;
+        });
+        _resumeAutoTimerAfterDelay();
+        return;
       }
 
       String tipoFinal = 'NORMAL';
@@ -755,9 +760,18 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       if (isNotProgrammed) {
         tipoFinal = 'NO_PROGRAMADO';
         duracionRetardo = null;
-        feedbackMsg = selection == 'ENTRADA'
+        feedbackMsg =
+            (selection == 'ENTRADA' || selection == 'ENTRADA_TRASLADO')
             ? 'Entrada registrada — No estabas programado hoy.'
             : 'Salida registrada — No estabas programado hoy.';
+      } else if (selection == 'ENTRADA_TRASLADO') {
+        tipoFinal = 'TRASLADO';
+        duracionRetardo = null;
+        feedbackMsg = 'Entrada por traslado registrada con éxito.';
+      } else if (selection == 'SALIDA_TRASLADO') {
+        tipoFinal = 'TRASLADO';
+        duracionRetardo = null;
+        feedbackMsg = 'Salida por traslado registrada. ¡Buen viaje!';
       } else if (selection == 'ENTRADA') {
         final validation = ScheduleValidator.validarMarcacion(horario, now);
         tipoFinal = validation.tipo;
@@ -765,7 +779,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         feedbackMsg = validation.descripcion;
       } else {
         // Verificar si es salida temprana
-        if (horario != null && ScheduleValidator.esSalidaTemprana(horario, now)) {
+        if (horario != null &&
+            ScheduleValidator.esSalidaTemprana(horario, now)) {
           tipoFinal = 'SALIDA_TEMPRANA';
           feedbackMsg = 'Salida anticipada registrada.';
         } else {
@@ -1200,22 +1215,57 @@ class EventSelectionDialog extends StatefulWidget {
 }
 
 class _EventSelectionDialogState extends State<EventSelectionDialog> {
+  final _database = DatabaseService();
   Timer? _timeoutTimer;
   int _secondsRemaining = 7;
+  bool _loading = true;
+  String? _lastEvento;
+  bool _isSameDay = false;
 
   @override
   void initState() {
     super.initState();
-    _timeoutTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (_secondsRemaining <= 1) {
-        timer.cancel();
-        if (mounted) Navigator.of(context).pop(null); // Cerrar por inactividad
-      } else {
+    _loadStateAndStartTimer();
+  }
+
+  Future<void> _loadStateAndStartTimer() async {
+    try {
+      final lastRecord = await _database.getLastAttendanceForEmployee(widget.employee.id!);
+      if (lastRecord != null) {
+        final String? lastTimestampStr = lastRecord['timestamp'];
+        if (lastTimestampStr != null) {
+          final lastDateTime = DateTime.tryParse(lastTimestampStr);
+          if (lastDateTime != null) {
+            final now = DateTime.now();
+            _isSameDay =
+                lastDateTime.year == now.year &&
+                lastDateTime.month == now.month &&
+                lastDateTime.day == now.day;
+          }
+        }
+        if (_isSameDay) {
+          _lastEvento = lastRecord['evento']?.toString();
+        }
+      }
+    } catch (e) {
+      debugPrint("Error al cargar estado del diálogo: $e");
+    } finally {
+      if (mounted) {
         setState(() {
-          _secondsRemaining--;
+          _loading = false;
         });
       }
-    });
+      _timeoutTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+        if (_secondsRemaining <= 1) {
+          timer.cancel();
+          if (mounted) Navigator.of(context).pop(null);
+        } else {
+          setState(() {
+            _secondsRemaining--;
+          });
+        }
+      });
+    }
   }
 
   @override
@@ -1227,6 +1277,11 @@ class _EventSelectionDialogState extends State<EventSelectionDialog> {
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    
+    // Calcular condiciones
+    final bool tieneEntradaActiva = _isSameDay && (_lastEvento == 'ENTRADA' || _lastEvento == 'ENTRADA_TRASLADO');
+    final bool vieneDeTraslado = _isSameDay && _lastEvento == 'SALIDA_TRASLADO';
+
     return AlertDialog(
       backgroundColor: const Color(0xFF2B3A24),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
@@ -1251,85 +1306,161 @@ class _EventSelectionDialogState extends State<EventSelectionDialog> {
           ),
         ],
       ),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const SizedBox(height: 8),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            children: [
-              // Botón ENTRADA
-              Expanded(
-                child: ElevatedButton(
-                  onPressed: () => Navigator.of(context).pop('ENTRADA'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.tealAccent.shade700,
-                    foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(16),
+      content: _loading
+          ? const SizedBox(
+              height: 100,
+              child: Center(
+                child: CircularProgressIndicator(color: Colors.amber),
+              ),
+            )
+          : Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const SizedBox(height: 8),
+                
+                // Mostrar ENTRADA (normal) si no tiene entrada activa y no viene de traslado
+                if (!tieneEntradaActiva && !vieneDeTraslado) ...[
+                  ElevatedButton(
+                    onPressed: () => Navigator.of(context).pop('ENTRADA'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.tealAccent.shade700,
+                      foregroundColor: Colors.white,
+                      minimumSize: const Size(double.infinity, 65),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      elevation: 5,
                     ),
-                    padding: const EdgeInsets.symmetric(vertical: 24),
-                    elevation: 5,
+                    child: const Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.login_rounded, size: 28, color: Colors.white),
+                        SizedBox(width: 12),
+                        Text(
+                          'REGISTRAR ENTRADA',
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                            letterSpacing: 1.1,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                  child: const Column(
+                ],
+
+                // Mostrar ENTRADA EN OTRA SEDE si viene de traslado (SALIDA_TRASLADO anterior hoy)
+                if (vieneDeTraslado) ...[
+                  ElevatedButton(
+                    onPressed: () => Navigator.of(context).pop('ENTRADA_TRASLADO'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.blue.shade700,
+                      foregroundColor: Colors.white,
+                      minimumSize: const Size(double.infinity, 65),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      elevation: 5,
+                    ),
+                    child: const Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.directions_run_rounded, size: 28, color: Colors.white),
+                        SizedBox(width: 12),
+                        Text(
+                          'ENTRADA EN OTRA SEDE',
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 15,
+                            letterSpacing: 1.0,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+
+                // Mostrar SALIDA y SALIDA A OTRA SEDE si tiene entrada activa hoy
+                if (tieneEntradaActiva) ...[
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                     children: [
-                      Icon(Icons.login_rounded, size: 36, color: Colors.white),
-                      SizedBox(height: 8),
-                      Text(
-                        'ENTRADA',
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 14,
-                          letterSpacing: 1.1,
+                      // Botón SALIDA normal
+                      Expanded(
+                        child: ElevatedButton(
+                          onPressed: () => Navigator.of(context).pop('SALIDA'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.redAccent.shade700,
+                            foregroundColor: Colors.white,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(16),
+                            ),
+                            padding: const EdgeInsets.symmetric(vertical: 18),
+                            elevation: 5,
+                          ),
+                          child: const Column(
+                            children: [
+                              Icon(Icons.logout_rounded, size: 28, color: Colors.white),
+                              SizedBox(height: 6),
+                              Text(
+                                'SALIDA\nFINAL',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 12,
+                                  letterSpacing: 1.1,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      // Botón SALIDA A OTRA SEDE (Traslado)
+                      Expanded(
+                        child: ElevatedButton(
+                          onPressed: () => Navigator.of(context).pop('SALIDA_TRASLADO'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.orange.shade700,
+                            foregroundColor: Colors.white,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(16),
+                            ),
+                            padding: const EdgeInsets.symmetric(vertical: 18),
+                            elevation: 5,
+                          ),
+                          child: const Column(
+                            children: [
+                              Icon(Icons.transfer_within_a_station_rounded, size: 28, color: Colors.white),
+                              SizedBox(height: 6),
+                              Text(
+                                'SALIDA A\nOTRA SEDE',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 12,
+                                  letterSpacing: 1.1,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ],
                   ),
-                ),
-              ),
-              const SizedBox(width: 16),
-              // Botón SALIDA
-              Expanded(
-                child: ElevatedButton(
-                  onPressed: () => Navigator.of(context).pop('SALIDA'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.redAccent.shade700,
-                    foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                    padding: const EdgeInsets.symmetric(vertical: 24),
-                    elevation: 5,
-                  ),
-                  child: const Column(
-                    children: [
-                      Icon(Icons.logout_rounded, size: 36, color: Colors.white),
-                      SizedBox(height: 8),
-                      Text(
-                        'SALIDA',
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 14,
-                          letterSpacing: 1.1,
-                        ),
-                      ),
-                    ],
+                ],
+
+                const SizedBox(height: 24),
+                Text(
+                  'Se cerrará por inactividad en $_secondsRemaining segundos...',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Colors.white38,
+                    fontStyle: FontStyle.italic,
                   ),
                 ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 24),
-          Text(
-            'Se cerrará por inactividad en $_secondsRemaining segundos...',
-            style: const TextStyle(
-              fontSize: 12,
-              color: Colors.white38,
-              fontStyle: FontStyle.italic,
+              ],
             ),
-          ),
-        ],
-      ),
       actions: [
         TextButton(
           onPressed: () => Navigator.of(context).pop(null),

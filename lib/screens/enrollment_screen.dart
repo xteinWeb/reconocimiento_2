@@ -28,6 +28,9 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
   final _lightQuality = LightQualityService();
   final _syncService = SyncService();
 
+  int _minFaceSize = 130;
+  double _centerTolerance = 0.15;
+
   final _nameController = TextEditingController();
   final _codeController = TextEditingController();
   final _deptController = TextEditingController();
@@ -101,9 +104,24 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
   }
 
   Future<void> _initialize() async {
+    await _loadConfigs();
     await _cameraService.initialize();
     await _faceRecognition.initialize();
     if (mounted) setState(() {});
+  }
+
+  Future<void> _loadConfigs() async {
+    try {
+      final sStr = await _database.getConfig('min_face_size');
+      final cStr = await _database.getConfig('center_tolerance');
+
+      setState(() {
+        if (sStr != null) _minFaceSize = int.tryParse(sStr) ?? 130;
+        if (cStr != null) _centerTolerance = double.tryParse(cStr) ?? 0.15;
+      });
+    } catch (e) {
+      debugPrint("Error al cargar configuraciones en enrolamiento: $e");
+    }
   }
 
   Future<void> _startEnrollment() async {
@@ -161,10 +179,30 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
           return;
         }
 
-        final result = await _faceDetection.detectFace(file.path);
+        final result = await _faceDetection.detectFace(
+          file.path,
+          minFaceSize: _minFaceSize,
+          centerTolerancePercentage: _centerTolerance,
+        );
         if (result == null) {
           setState(() {
             _status = "No se detecta rostro";
+            _isProcessing = false;
+          });
+          return;
+        }
+
+        if (result.isNotCentered) {
+          setState(() {
+            _status = "⚠️ Por favor, centra tu rostro en el círculo.";
+            _isProcessing = false;
+          });
+          return;
+        }
+
+        if (result.isTooSmall) {
+          setState(() {
+            _status = "⚠️ Por favor, acércate más a la pantalla.";
             _isProcessing = false;
           });
           return;

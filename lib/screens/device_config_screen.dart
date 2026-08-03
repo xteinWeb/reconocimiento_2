@@ -24,6 +24,15 @@ class _DeviceConfigScreenState extends State<DeviceConfigScreen> {
   String? _selectedDeviceId;
   String _selectedIp = SqlServerService.ipPublica;
 
+  double _threshold = 0.35;
+  int _minFaceSize = 130;
+  double _centerTolerance = 0.15;
+
+  final _versionNameController = TextEditingController();
+  final _versionCodeController = TextEditingController();
+  final _urlApkController = TextEditingController();
+  bool _isPublishing = false;
+
   @override
   void initState() {
     super.initState();
@@ -33,10 +42,17 @@ class _DeviceConfigScreenState extends State<DeviceConfigScreen> {
   Future<void> _loadCurrentDevice() async {
     final devId = await _database.getDeviceId();
     final customIp = await _database.getConfig('sql_server_ip');
+    final tStr = await _database.getConfig('recognition_threshold');
+    final sStr = await _database.getConfig('min_face_size');
+    final cStr = await _database.getConfig('center_tolerance');
+
     setState(() {
       _currentDeviceId = devId;
       _selectedDeviceId = devId;
       _selectedIp = customIp ?? SqlServerService.ipPublica;
+      if (tStr != null) _threshold = double.tryParse(tStr) ?? 0.35;
+      if (sStr != null) _minFaceSize = int.tryParse(sStr) ?? 130;
+      if (cStr != null) _centerTolerance = double.tryParse(cStr) ?? 0.15;
     });
   }
 
@@ -123,9 +139,77 @@ class _DeviceConfigScreenState extends State<DeviceConfigScreen> {
     }
   }
 
+  Future<void> _publicarVersion() async {
+    final vName = _versionNameController.text.trim();
+    final vCodeStr = _versionCodeController.text.trim();
+    final urlApk = _urlApkController.text.trim();
+
+    if (vName.isEmpty || vCodeStr.isEmpty || urlApk.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Por favor, completa todos los campos del publicador.'),
+          backgroundColor: AppColors.error,
+        ),
+      );
+      return;
+    }
+
+    final vCode = int.tryParse(vCodeStr);
+    if (vCode == null || vCode <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('El código de versión debe ser un entero mayor que cero.'),
+          backgroundColor: AppColors.error,
+        ),
+      );
+      return;
+    }
+
+    setState(() => _isPublishing = true);
+    try {
+      final success = await _sqlServer.publicarNuevaVersion(
+        versionCode: vCode,
+        versionName: vName,
+        urlApk: urlApk,
+      );
+
+      if (success && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('¡Nueva versión publicada con éxito en el servidor!'),
+            backgroundColor: AppColors.success,
+          ),
+        );
+        _versionNameController.clear();
+        _versionCodeController.clear();
+        _urlApkController.clear();
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Error al guardar versión en SQL Server.'),
+              backgroundColor: AppColors.error,
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error: $e'), backgroundColor: AppColors.error),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isPublishing = false);
+    }
+  }
+
   @override
   void dispose() {
     _passwordController.dispose();
+    _versionNameController.dispose();
+    _versionCodeController.dispose();
+    _urlApkController.dispose();
     super.dispose();
   }
 
@@ -206,8 +290,8 @@ class _DeviceConfigScreenState extends State<DeviceConfigScreen> {
   }
 
   Widget _buildSelectionView(bool isDark) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+    return ListView(
+      physics: const BouncingScrollPhysics(),
       children: [
         // Estado actual
         Container(
@@ -329,84 +413,278 @@ class _DeviceConfigScreenState extends State<DeviceConfigScreen> {
             ],
           ),
         ),
+        const SizedBox(height: 16),
+        
+        // Calibración del Entorno
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: isDark ? AppColors.kioskSurface : Colors.white,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: isDark ? Colors.white10 : Colors.black12),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Row(
+                children: [
+                  Icon(Icons.tune_rounded, color: AppColors.primary, size: 24),
+                  SizedBox(width: 12),
+                  Text(
+                    'Calibración del Entorno',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              
+              // Umbral de Distancia Coseno
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text('Sensibilidad (Umbral Distancia)', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                  Text(
+                    _threshold.toStringAsFixed(2),
+                    style: const TextStyle(fontWeight: FontWeight.bold, color: AppColors.primary),
+                  ),
+                ],
+              ),
+              const Text(
+                'Menores valores reducen falsos positivos pero exigen una pose más exacta.',
+                style: TextStyle(fontSize: 11, color: Colors.grey),
+              ),
+              Slider(
+                value: _threshold,
+                min: 0.20,
+                max: 0.50,
+                divisions: 30,
+                activeColor: AppColors.primary,
+                label: _threshold.toStringAsFixed(2),
+                onChanged: (val) {
+                  setState(() => _threshold = val);
+                  _database.saveConfig('recognition_threshold', val.toString());
+                },
+              ),
+              const SizedBox(height: 8),
+
+              // Tamaño Mínimo de Rostro
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text('Tamaño Mínimo del Rostro', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                  Text(
+                    '${_minFaceSize}px',
+                    style: const TextStyle(fontWeight: FontWeight.bold, color: AppColors.primary),
+                  ),
+                ],
+              ),
+              const Text(
+                'Filtra caras lejanas. El usuario deberá acercarse para ser detectado.',
+                style: TextStyle(fontSize: 11, color: Colors.grey),
+              ),
+              Slider(
+                value: _minFaceSize.toDouble(),
+                min: 80,
+                max: 250,
+                divisions: 17,
+                activeColor: AppColors.primary,
+                label: '${_minFaceSize}px',
+                onChanged: (val) {
+                  setState(() => _minFaceSize = val.toInt());
+                  _database.saveConfig('min_face_size', val.toInt().toString());
+                },
+              ),
+              const SizedBox(height: 8),
+
+              // Tolerancia de Centrado
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text('Tolerancia de Centrado', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                  Text(
+                    '${(_centerTolerance * 100).toInt()}%',
+                    style: const TextStyle(fontWeight: FontWeight.bold, color: AppColors.primary),
+                  ),
+                ],
+              ),
+              const Text(
+                'Define qué tan alejado del centro del círculo guía puede estar el rostro.',
+                style: TextStyle(fontSize: 11, color: Colors.grey),
+              ),
+              Slider(
+                value: _centerTolerance,
+                min: 0.05,
+                max: 0.30,
+                divisions: 25,
+                activeColor: AppColors.primary,
+                label: '${(_centerTolerance * 100).toInt()}%',
+                onChanged: (val) {
+                  setState(() => _centerTolerance = val);
+                  _database.saveConfig('center_tolerance', val.toString());
+                },
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+
+        // Publicar Actualización de App
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: isDark ? AppColors.kioskSurface : Colors.white,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: isDark ? Colors.white10 : Colors.black12),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Row(
+                children: [
+                  Icon(Icons.publish_rounded, color: AppColors.primary, size: 24),
+                  SizedBox(width: 12),
+                  Text(
+                    'Publicar Actualización de App',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'Completa estos datos para registrar una nueva actualización y notificar a todas las sedes.',
+                style: TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _versionNameController,
+                decoration: InputDecoration(
+                  labelText: 'Nombre de Versión (Ej: 2.1.0)',
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                  prefixIcon: const Icon(Icons.label_outline_rounded),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _versionCodeController,
+                keyboardType: TextInputType.number,
+                decoration: InputDecoration(
+                  labelText: 'Código de Versión (Ej: 3)',
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                  prefixIcon: const Icon(Icons.onetwothree_rounded),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _urlApkController,
+                decoration: InputDecoration(
+                  labelText: 'Enlace de Google Drive del APK',
+                  hintText: 'https://drive.google.com/file/d/...',
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                  prefixIcon: const Icon(Icons.link_rounded),
+                ),
+              ),
+              const SizedBox(height: 16),
+              ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.secondary,
+                  foregroundColor: Colors.white,
+                  minimumSize: const Size.fromHeight(50),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+                onPressed: _isPublishing ? null : _publicarVersion,
+                icon: _isPublishing
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
+                      )
+                    : const Icon(Icons.cloud_upload_rounded),
+                label: const Text('Publicar Nueva Versión en Servidor', style: TextStyle(fontWeight: FontWeight.bold)),
+              ),
+            ],
+          ),
+        ),
         const SizedBox(height: 24),
         const Text(
           'Selecciona un Dispositivo Disponible en SQL Server',
           style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
         ),
         const SizedBox(height: 12),
-        Expanded(
-          child: _isLoading
-              ? const Center(child: CircularProgressIndicator())
-              : _devices.isEmpty
-                  ? Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const Text('No se encontraron dispositivos autorizados.'),
-                          const SizedBox(height: 12),
-                          TextButton.icon(
-                            onPressed: _fetchDevicesFromServer,
-                            icon: const Icon(Icons.refresh),
-                            label: const Text('Reintentar'),
-                          )
-                        ],
-                      ),
-                    )
-                  : ListView.builder(
-                      itemCount: _devices.length,
-                      itemBuilder: (context, index) {
-                        final dev = _devices[index];
-                        final String devId = dev['id_dispositivo'] ?? dev['ID_DISPOSITIVO'];
-                        final String desc = dev['descripcion'] ?? dev['DESCRIPCION'] ?? '';
-                        final int enUso = int.tryParse(dev['en_uso']?.toString() ?? '0') ?? 0;
-                        final bool isCurrent = devId == _currentDeviceId;
-
-                        return Card(
-                          color: isDark ? Colors.white.withOpacity(0.03) : Colors.white,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                            side: BorderSide(
-                              color: _selectedDeviceId == devId
-                                  ? AppColors.primary
-                                  : Colors.transparent,
-                              width: 2,
-                            ),
-                          ),
-                          child: ListTile(
-                            leading: Radio<String>(
-                              value: devId,
-                              groupValue: _selectedDeviceId,
-                              onChanged: (val) {
-                                setState(() {
-                                  _selectedDeviceId = val;
-                                });
-                              },
-                            ),
-                            title: Text(devId, style: const TextStyle(fontWeight: FontWeight.bold)),
-                            subtitle: Text(desc),
-                            trailing: isCurrent
-                                ? const Chip(
-                                    label: Text('Asignado a esta Tablet', style: TextStyle(fontSize: 11)),
-                                    backgroundColor: Colors.green,
-                                    labelStyle: TextStyle(color: Colors.white),
-                                  )
-                                : enUso == 1
-                                    ? const Chip(
-                                        label: Text('En Uso (Otra Tablet)', style: TextStyle(fontSize: 11)),
-                                        backgroundColor: Colors.orange,
-                                        labelStyle: TextStyle(color: Colors.white),
-                                      )
-                                    : const Chip(
-                                        label: Text('Libre', style: TextStyle(fontSize: 11)),
-                                        backgroundColor: Colors.blue,
-                                        labelStyle: TextStyle(color: Colors.white),
-                                      ),
-                          ),
-                        );
-                      },
+        _isLoading
+            ? const Center(child: Padding(
+                padding: EdgeInsets.all(24.0),
+                child: CircularProgressIndicator(),
+              ))
+            : _devices.isEmpty
+                ? Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Text('No se encontraron dispositivos autorizados.'),
+                        const SizedBox(height: 12),
+                        TextButton.icon(
+                          onPressed: _fetchDevicesFromServer,
+                          icon: const Icon(Icons.refresh),
+                          label: const Text('Reintentar'),
+                        )
+                      ],
                     ),
-        ),
+                  )
+                : ListView.builder(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    itemCount: _devices.length,
+                    itemBuilder: (context, index) {
+                      final dev = _devices[index];
+                      final String devId = dev['id_dispositivo'] ?? dev['ID_DISPOSITIVO'];
+                      final String desc = dev['descripcion'] ?? dev['DESCRIPCION'] ?? '';
+                      final int enUso = int.tryParse(dev['en_uso']?.toString() ?? '0') ?? 0;
+                      final bool isCurrent = devId == _currentDeviceId;
+
+                      return Card(
+                        color: isDark ? Colors.white.withOpacity(0.03) : Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          side: BorderSide(
+                            color: _selectedDeviceId == devId
+                                ? AppColors.primary
+                                : Colors.transparent,
+                            width: 2,
+                          ),
+                        ),
+                        child: ListTile(
+                          leading: Radio<String>(
+                            value: devId,
+                            groupValue: _selectedDeviceId,
+                            onChanged: (val) {
+                              setState(() {
+                                _selectedDeviceId = val;
+                              });
+                            },
+                          ),
+                          title: Text(devId, style: const TextStyle(fontWeight: FontWeight.bold)),
+                          subtitle: Text(desc),
+                          trailing: isCurrent
+                              ? const Chip(
+                                  label: Text('Asignado a esta Tablet', style: TextStyle(fontSize: 11)),
+                                  backgroundColor: Colors.green,
+                                  labelStyle: TextStyle(color: Colors.white),
+                                )
+                              : enUso == 1
+                                  ? const Chip(
+                                      label: Text('En Uso (Otra Tablet)', style: TextStyle(fontSize: 11)),
+                                      backgroundColor: Colors.orange,
+                                      labelStyle: TextStyle(color: Colors.white),
+                                    )
+                                  : const Chip(
+                                      label: Text('Libre', style: TextStyle(fontSize: 11)),
+                                      backgroundColor: Colors.blue,
+                                      labelStyle: TextStyle(color: Colors.white),
+                                    ),
+                        ),
+                      );
+                    },
+                  ),
         const SizedBox(height: 16),
         ElevatedButton(
           style: ElevatedButton.styleFrom(

@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
@@ -14,14 +15,51 @@ class FaceDetectionService {
     ),
   );
 
-  /// Detecta rostros y devuelve info de ángulos
-  Future<FaceDetectionResult?> detectFace(String imagePath) async {
+  /// Detecta rostros y devuelve info de ángulos, tamaño y centrado
+  Future<FaceDetectionResult?> detectFace(
+    String imagePath, {
+    int minFaceSize = 130,
+    double centerTolerancePercentage = 0.15,
+  }) async {
     final inputImage = InputImage.fromFilePath(imagePath);
     final faces = await _detector.processImage(inputImage);
 
     if (faces.isEmpty) return null;
 
+    // Ordenar por tamaño de bounding box descendente (priorizar rostro más cercano)
+    faces.sort((a, b) {
+      final areaA = a.boundingBox.width * a.boundingBox.height;
+      final areaB = b.boundingBox.width * b.boundingBox.height;
+      return areaB.compareTo(areaA);
+    });
+
     final face = faces.first;
+
+    // Obtener dimensiones de la imagen para validar centrado
+    final bytes = await File(imagePath).readAsBytes();
+    final image = img.decodeImage(bytes);
+    if (image == null) return null;
+
+    final faceWidth = face.boundingBox.width;
+    final faceHeight = face.boundingBox.height;
+    final isTooSmall = faceWidth < minFaceSize || faceHeight < minFaceSize;
+
+    // Calcular el centro de la imagen y del rostro
+    final imgCenterX = image.width / 2.0;
+    final imgCenterY = image.height / 2.0;
+    final faceCenterX = face.boundingBox.left + faceWidth / 2.0;
+    final faceCenterY = face.boundingBox.top + faceHeight / 2.0;
+
+    // Distancia euclidiana al centro
+    final distanceToCenter = sqrt(
+      pow(faceCenterX - imgCenterX, 2) + pow(faceCenterY - imgCenterY, 2),
+    );
+
+    // La tolerancia es un porcentaje de la dimensión menor de la imagen
+    final minDimension = min(image.width, image.height);
+    final maxDistance = minDimension * centerTolerancePercentage;
+    final isNotCentered = distanceToCenter > maxDistance;
+
     return FaceDetectionResult(
       face: face,
       yaw: face.headEulerAngleY ?? 0,
@@ -29,6 +67,8 @@ class FaceDetectionService {
       roll: face.headEulerAngleZ ?? 0,
       boundingBox: face.boundingBox,
       smilingProbability: face.smilingProbability,
+      isTooSmall: isTooSmall,
+      isNotCentered: isNotCentered,
     );
   }
 
@@ -59,6 +99,8 @@ class FaceDetectionResult {
   final double yaw, pitch, roll;
   final Rect boundingBox;
   final double? smilingProbability;
+  final bool isTooSmall;
+  final bool isNotCentered;
 
   FaceDetectionResult({
     required this.face,
@@ -67,6 +109,8 @@ class FaceDetectionResult {
     required this.roll,
     required this.boundingBox,
     this.smilingProbability,
+    this.isTooSmall = false,
+    this.isNotCentered = false,
   });
 
   bool isValidPose(Map<String, double> pose) {

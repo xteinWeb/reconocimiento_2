@@ -9,6 +9,8 @@ import 'device_config_screen.dart';
 import '../services/sync_service.dart';
 import '../theme/app_colors.dart';
 
+import '../services/version_helper.dart';
+
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -28,9 +30,21 @@ class _HomeScreenState extends State<HomeScreen> {
         .sincronizarAsistenciasPendientes()
         .then((result) {
           print('[Sync] Sincronización automática inicial completa: $result');
+          // Verificar actualizaciones de la app
+          Future.delayed(const Duration(seconds: 1), () {
+            if (mounted) {
+              VersionHelper().verificarActualizacion(context);
+            }
+          });
         })
         .catchError((e) {
           print('[Sync] Error en sincronización automática inicial: $e');
+          // Aun si falla la sincronización, intentar verificar versión
+          Future.delayed(const Duration(seconds: 1), () {
+            if (mounted) {
+              VersionHelper().verificarActualizacion(context);
+            }
+          });
         });
   }
 

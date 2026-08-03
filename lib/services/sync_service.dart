@@ -137,6 +137,7 @@ class SyncService {
       final employeeId = await _insertOrUpdateEmployee(employee);
 
       // Sincronizar el vector biométrico si existe
+      print('[Sync] Empleado: $nombre ($cedula) - skipOverwrite: $skipVectorOverwrite, mapaVectorFotoStr length: ${mapaVectorFotoStr.length}');
       if (!skipVectorOverwrite && mapaVectorFotoStr.isNotEmpty) {
         try {
           final List<dynamic> rawVector = jsonDecode(mapaVectorFotoStr);
@@ -347,6 +348,7 @@ class SyncService {
           nombre: employee.name,
           poses: sortedPoses,
           departamento: employee.department,
+          horarioId: employee.horarioId,
         );
 
         if (success) {
@@ -367,6 +369,7 @@ class SyncService {
     required String nombre,
     required List<List<double>> poses,
     String? departamento,
+    String? horarioId,
   }) async {
     try {
       // Unificar las 5 poses en un vector plano de 960
@@ -377,6 +380,7 @@ class SyncService {
         nombre: nombre,
         vector: combinedVector,
         idSeccion: departamento,
+        horarioId: horarioId,
       );
 
       if (success) {
