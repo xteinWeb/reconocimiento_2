@@ -33,6 +33,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   double _threshold = 0.22;
   int _minFaceSize = 130;
   double _centerTolerance = 0.15;
+  int? _lastMatchedId;
+  int _consecutiveMatchCount = 0;
 
   String _status = "Mira a la cámara para marcar";
   String _lightStatus = "";
@@ -281,7 +283,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   void _startAutoTimer() {
     _autoTimer?.cancel();
     _autoTimer = Timer.periodic(
-      const Duration(seconds: 2),
+      const Duration(milliseconds: 700),
       (_) => _markAttendance(),
     );
   }
@@ -327,6 +329,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         setState(() {
           _status = "Buscando rostro...";
           _isProcessing = false;
+          _consecutiveMatchCount = 0;
+          _lastMatchedId = null;
         });
         return;
       }
@@ -335,6 +339,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         setState(() {
           _status = "⚠️ Por favor, centra tu rostro en el círculo.";
           _isProcessing = false;
+          _consecutiveMatchCount = 0;
+          _lastMatchedId = null;
         });
         return;
       }
@@ -343,6 +349,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         setState(() {
           _status = "⚠️ Por favor, acércate más a la pantalla.";
           _isProcessing = false;
+          _consecutiveMatchCount = 0;
+          _lastMatchedId = null;
         });
         return;
       }
@@ -352,6 +360,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         setState(() {
           _status = "⚠️ Por favor, mira de frente a la pantalla.";
           _isProcessing = false;
+          _consecutiveMatchCount = 0;
+          _lastMatchedId = null;
         });
         return;
       }
@@ -364,6 +374,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         setState(() {
           _status = "Ajustando encuadre...";
           _isProcessing = false;
+          _consecutiveMatchCount = 0;
+          _lastMatchedId = null;
         });
         return;
       }
@@ -376,6 +388,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           _status = "No hay colaboradores enrolados en el dispositivo.";
           _scanState = ScanState.failure;
           _isProcessing = false;
+          _consecutiveMatchCount = 0;
+          _lastMatchedId = null;
         });
         return;
       }
@@ -413,6 +427,27 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       );
 
       if (distance < _threshold && matchedId != null) {
+        if (_isAutoMode) {
+          if (_lastMatchedId == matchedId) {
+            _consecutiveMatchCount++;
+          } else {
+            _lastMatchedId = matchedId;
+            _consecutiveMatchCount = 1;
+          }
+
+          if (_consecutiveMatchCount < 3) {
+            setState(() {
+              _status = "Confirmando identidad... (${_consecutiveMatchCount}/3)";
+              _isProcessing = false;
+            });
+            return;
+          }
+        }
+
+        // Si llegó a 3 o es modo manual, resetear para la marcación
+        _consecutiveMatchCount = 0;
+        _lastMatchedId = null;
+
         final employee = await _database.getEmployeeById(matchedId);
         if (employee != null) {
           // 1. Pausar el temporizador automático temporalmente para no acumular fotos
@@ -569,18 +604,29 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         }
       } else {
         setState(() {
-          _scanState = ScanState.failure;
-          _status = "Rostro no reconocido.";
+          _consecutiveMatchCount = 0;
+          _lastMatchedId = null;
         });
-        Future.delayed(const Duration(seconds: 2), () {
-          if (mounted && _scanState == ScanState.failure) {
-            setState(() {
-              _scanState = ScanState.idle;
-              _status = "Mira a la cámara para marcar";
-              _topMatches = [];
-            });
-          }
-        });
+
+        if (!_isAutoMode) {
+          setState(() {
+            _scanState = ScanState.failure;
+            _status = "Rostro no reconocido.";
+          });
+          Future.delayed(const Duration(seconds: 2), () {
+            if (mounted && _scanState == ScanState.failure) {
+              setState(() {
+                _scanState = ScanState.idle;
+                _status = "Presiona Marcar para escanear";
+                _topMatches = [];
+              });
+            }
+          });
+        } else {
+          setState(() {
+            _status = "Mira a la cámara para marcar";
+          });
+        }
       }
     } catch (e) {
       setState(() => _status = "Error: $e");
@@ -1012,6 +1058,21 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                               : null),
                   ),
                 ),
+
+                // Progreso de confirmación multicuadro
+                if (_consecutiveMatchCount > 0 && _scanState == ScanState.idle)
+                  Center(
+                    child: SizedBox(
+                      width: 263,
+                      height: 263,
+                      child: CircularProgressIndicator(
+                        value: _consecutiveMatchCount / 3.0,
+                        strokeWidth: 5,
+                        valueColor: const AlwaysStoppedAnimation<Color>(Colors.cyanAccent),
+                        backgroundColor: Colors.transparent,
+                      ),
+                    ),
+                  ),
 
                 // Tarjeta de confirmación del empleado en caso de éxito
                 if (_scanState == ScanState.success &&
