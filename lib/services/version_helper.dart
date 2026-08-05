@@ -23,7 +23,10 @@ class VersionHelper {
   }
 
   /// Verifica si hay actualizaciones disponibles en SQL Server
-  Future<void> verificarActualizacion(BuildContext context, {bool mostrarAvisoSinNovedades = false}) async {
+  Future<void> verificarActualizacion(
+    BuildContext context, {
+    bool mostrarAvisoSinNovedades = false,
+  }) async {
     try {
       // Primero, asegurarse de que las tablas existan
       await _sqlServer.asegurarTablasDispositivosEnServidor();
@@ -31,13 +34,18 @@ class VersionHelper {
 
       if (latestVersion == null) {
         if (mostrarAvisoSinNovedades && context.mounted) {
-          _mostrarMensaje(context, "Sincronización de Versión", "No se encontró información de versiones en el servidor.");
+          _mostrarMensaje(
+            context,
+            "Sincronización de Versión",
+            "No se encontró información de versiones en el servidor.",
+          );
         }
         return;
       }
 
       final int serverVersionCode = latestVersion['version_code'] as int;
-      final String serverVersionName = latestVersion['version_name']?.toString() ?? "1.0.0";
+      final String serverVersionName =
+          latestVersion['version_name']?.toString() ?? "1.0.0";
       final String rawUrlApk = latestVersion['url_apk']?.toString() ?? "";
 
       if (serverVersionCode > currentVersionCode) {
@@ -47,7 +55,8 @@ class VersionHelper {
 
         showDialog(
           context: context,
-          barrierDismissible: true, // No bloqueante, se puede cerrar pulsando fuera
+          barrierDismissible:
+              true, // No bloqueante, se puede cerrar pulsando fuera
           builder: (ctx) => AlertDialog(
             title: const Row(
               children: [
@@ -65,7 +74,10 @@ class VersionHelper {
             actions: [
               TextButton(
                 onPressed: () => Navigator.of(ctx).pop(),
-                child: const Text('Más tarde', style: TextStyle(color: Colors.grey)),
+                child: const Text(
+                  'Más tarde',
+                  style: TextStyle(color: Colors.grey),
+                ),
               ),
               ElevatedButton(
                 style: ElevatedButton.styleFrom(
@@ -79,7 +91,11 @@ class VersionHelper {
                     await launchUrl(uri, mode: LaunchMode.externalApplication);
                   } else {
                     if (context.mounted) {
-                      _mostrarMensaje(context, "Error", "No se pudo abrir el enlace de descarga:\n$directUrl");
+                      _mostrarMensaje(
+                        context,
+                        "Error",
+                        "No se pudo abrir el enlace de descarga:\n$directUrl",
+                      );
                     }
                   }
                 },
@@ -94,19 +110,27 @@ class VersionHelper {
             context,
             "Sincronización de Versión",
             "La aplicación ya está actualizada a la versión más reciente:\n"
-            "v$currentVersionName (Build $currentVersionCode)",
+                "v$currentVersionName (Build $currentVersionCode)",
           );
         }
       }
     } catch (e) {
       debugPrint("[VersionHelper] Error al verificar versión: $e");
       if (mostrarAvisoSinNovedades && context.mounted) {
-        _mostrarMensaje(context, "Error de Conexión", "No se pudo comprobar la versión en el servidor:\n$e");
+        _mostrarMensaje(
+          context,
+          "Error de Conexión",
+          "No se pudo comprobar la versión en el servidor:\n$e",
+        );
       }
     }
   }
 
-  static void _mostrarMensaje(BuildContext context, String titulo, String mensaje) {
+  static void _mostrarMensaje(
+    BuildContext context,
+    String titulo,
+    String mensaje,
+  ) {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(

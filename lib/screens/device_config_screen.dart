@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../services/database_service.dart';
 import '../services/sql_server_service.dart';
+import '../services/version_helper.dart';
 import '../theme/app_colors.dart';
 
 class DeviceConfigScreen extends StatefulWidget {
@@ -24,7 +25,7 @@ class _DeviceConfigScreenState extends State<DeviceConfigScreen> {
   String? _selectedDeviceId;
   String _selectedIp = SqlServerService.ipPublica;
 
-  double _threshold = 0.35;
+  double _threshold = 0.22;
   int _minFaceSize = 130;
   double _centerTolerance = 0.15;
 
@@ -50,7 +51,7 @@ class _DeviceConfigScreenState extends State<DeviceConfigScreen> {
       _currentDeviceId = devId;
       _selectedDeviceId = devId;
       _selectedIp = customIp ?? SqlServerService.ipPublica;
-      if (tStr != null) _threshold = double.tryParse(tStr) ?? 0.35;
+      if (tStr != null) _threshold = double.tryParse(tStr) ?? 0.22;
       if (sStr != null) _minFaceSize = int.tryParse(sStr) ?? 130;
       if (cStr != null) _centerTolerance = double.tryParse(cStr) ?? 0.15;
     });
@@ -454,9 +455,9 @@ class _DeviceConfigScreenState extends State<DeviceConfigScreen> {
                 style: TextStyle(fontSize: 11, color: Colors.grey),
               ),
               Slider(
-                value: _threshold,
-                min: 0.20,
-                max: 0.50,
+                value: _threshold.clamp(0.15, 0.45),
+                min: 0.15,
+                max: 0.45,
                 divisions: 30,
                 activeColor: AppColors.primary,
                 label: _threshold.toStringAsFixed(2),
@@ -553,6 +554,32 @@ class _DeviceConfigScreenState extends State<DeviceConfigScreen> {
               const Text(
                 'Completa estos datos para registrar una nueva actualización y notificar a todas las sedes.',
                 style: TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+              const SizedBox(height: 12),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                decoration: BoxDecoration(
+                  color: AppColors.primary.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: AppColors.primary.withOpacity(0.2)),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.info_outline_rounded, color: AppColors.primary, size: 20),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        'Versión actual en ejecución: v${VersionHelper.currentVersionName} (Build ${VersionHelper.currentVersionCode})',
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                          color: AppColors.primary,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
               ),
               const SizedBox(height: 16),
               TextField(

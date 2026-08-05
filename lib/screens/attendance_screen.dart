@@ -30,7 +30,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   final _sqlServer = SqlServerService();
   final _syncService = SyncService();
 
-  double _threshold = 0.35;
+  double _threshold = 0.22;
   int _minFaceSize = 130;
   double _centerTolerance = 0.15;
 
@@ -71,13 +71,122 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       final cStr = await _database.getConfig('center_tolerance');
 
       setState(() {
-        if (tStr != null) _threshold = double.tryParse(tStr) ?? 0.35;
+        if (tStr != null) _threshold = double.tryParse(tStr) ?? 0.22;
         if (sStr != null) _minFaceSize = int.tryParse(sStr) ?? 130;
         if (cStr != null) _centerTolerance = double.tryParse(cStr) ?? 0.15;
       });
     } catch (e) {
       debugPrint("Error al cargar configuraciones: $e");
     }
+  }
+
+  Future<bool> _mostrarDialogoBypass(
+    String title,
+    String message,
+  ) async {
+    if (!mounted) return false;
+
+    bool? result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        int secondsRemaining = 5;
+        Timer? timer;
+
+        return StatefulBuilder(
+          builder: (context, setState) {
+            // Iniciar el temporizador si no está activo
+            timer ??= Timer.periodic(const Duration(seconds: 1), (t) {
+              if (secondsRemaining > 1) {
+                if (context.mounted) {
+                  setState(() {
+                    secondsRemaining--;
+                  });
+                }
+              } else {
+                t.cancel();
+                if (context.mounted) {
+                  Navigator.of(context).pop(true); // Auto-confirmar
+                }
+              }
+            });
+
+            return AlertDialog(
+              backgroundColor: const Color(0xFF2B3A24),
+              title: Row(
+                children: [
+                  const Icon(Icons.warning_amber_rounded, color: Colors.amber, size: 28),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      title,
+                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ],
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    message,
+                    style: const TextStyle(color: Colors.white70, fontSize: 14),
+                  ),
+                  const SizedBox(height: 20),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          valueColor: AlwaysStoppedAnimation<Color>(Colors.amber),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Text(
+                        'Registrando automáticamente en ${secondsRemaining}s...',
+                        style: const TextStyle(color: Colors.amber, fontSize: 13, fontWeight: FontWeight.bold),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    timer?.cancel();
+                    Navigator.of(context).pop(false); // Cancelar
+                  },
+                  child: const Text(
+                    'Cancelar',
+                    style: TextStyle(color: Colors.white60),
+                  ),
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.amber,
+                    foregroundColor: const Color(0xFF2B3A24),
+                  ),
+                  onPressed: () {
+                    timer?.cancel();
+                    Navigator.of(context).pop(true); // Registrar de todos modos
+                  },
+                  child: const Text(
+                    'Registrar de todos modos',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    return result ?? false;
   }
 
   Future<bool> _validarFlujoMarcacion(
@@ -123,78 +232,47 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     }
 
     bool isValid = true;
-    String errorTitle = '';
-    String errorMsg = '';
 
     if (selection == 'SALIDA') {
       final bool tieneEntradaPreviaHoy =
-          lastRecord != null &&
-          (lastEvento == 'ENTRADA' || lastEvento == 'ENTRADA_TRASLADO') &&
-          isSameDay;
+          isSameDay && (lastEvento == 'ENTRADA' || lastEvento == 'ENTRADA_TRASLADO');
 
       if (!tieneEntradaPreviaHoy) {
-        isValid = false;
-        errorTitle = 'Entrada Requerida';
-        errorMsg =
-            'No se puede registrar SALIDA porque no tienes un registro de ENTRADA previo el día de hoy.\nDebes registrar tu ENTRADA primero.';
+        isValid = await _mostrarDialogoBypass(
+          'Entrada Requerida',
+          'No se detectó un registro de ENTRADA previo el día de hoy para este colaborador.',
+        );
       }
     } else if (selection == 'SALIDA_TRASLADO') {
       final bool tieneEntradaPreviaHoy =
-          lastRecord != null &&
-          (lastEvento == 'ENTRADA' || lastEvento == 'ENTRADA_TRASLADO') &&
-          isSameDay;
+          isSameDay && (lastEvento == 'ENTRADA' || lastEvento == 'ENTRADA_TRASLADO');
 
       if (!tieneEntradaPreviaHoy) {
-        isValid = false;
-        errorTitle = 'Entrada Requerida';
-        errorMsg =
-            'No se puede registrar SALIDA POR TRASLADO porque no tienes un registro de ENTRADA previo el día de hoy.';
+        isValid = await _mostrarDialogoBypass(
+          'Entrada Requerida',
+          'No se detectó un registro de ENTRADA previo el día de hoy para esta SALIDA POR TRASLADO.',
+        );
       }
     } else if (selection == 'ENTRADA') {
       final bool yaTieneEntradaActiva =
-          lastRecord != null &&
-          (lastEvento == 'ENTRADA' || lastEvento == 'ENTRADA_TRASLADO') &&
-          isSameDay;
+          isSameDay && (lastEvento == 'ENTRADA' || lastEvento == 'ENTRADA_TRASLADO');
 
       if (yaTieneEntradaActiva) {
-        isValid = false;
-        errorTitle = 'Registro Duplicado';
-        errorMsg =
-            'Ya registraste una ENTRADA anteriormente el día de hoy.\nDebes registrar tu SALIDA primero.';
+        isValid = await _mostrarDialogoBypass(
+          'Registro Duplicado',
+          'Ya se encuentra registrada una ENTRADA activa para el día de hoy.',
+        );
       }
     } else if (selection == 'ENTRADA_TRASLADO') {
       final bool vieneDeTraslado =
-          lastRecord != null && lastEvento == 'SALIDA_TRASLADO' && isSameDay;
+          isSameDay && lastEvento == 'SALIDA_TRASLADO';
 
       if (!vieneDeTraslado) {
-        isValid = false;
-        errorTitle = 'Traslado no Iniciado';
-        errorMsg =
-            'Para marcar ENTRADA POR TRASLADO, primero debes haber registrado una SALIDA POR TRASLADO en la sede de origen.';
+        isValid = await _mostrarDialogoBypass(
+          'Traslado no Iniciado',
+          'No se detectó una SALIDA POR TRASLADO previa en la sede de origen el día de hoy.',
+        );
       }
-    }
-
-    if (!isValid && mounted) {
-      await showDialog(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          backgroundColor: const Color(0xFF2B3A24),
-          title: Text(errorTitle, style: const TextStyle(color: Colors.white)),
-          content: Text(
-            errorMsg,
-            style: const TextStyle(color: Colors.white70),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text(
-                'Aceptar',
-                style: TextStyle(color: Colors.amber),
-              ),
-            ),
-          ],
-        ),
-      );
     }
 
     return isValid;
@@ -264,6 +342,15 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       if (detection.isTooSmall) {
         setState(() {
           _status = "⚠️ Por favor, acércate más a la pantalla.";
+          _isProcessing = false;
+        });
+        return;
+      }
+
+      // Validar que la persona esté mirando de frente a la cámara (frontal) para evitar falsos positivos
+      if (detection.yaw.abs() > 15.0 || detection.pitch.abs() > 15.0) {
+        setState(() {
+          _status = "⚠️ Por favor, mira de frente a la pantalla.";
           _isProcessing = false;
         });
         return;

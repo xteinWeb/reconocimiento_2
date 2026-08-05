@@ -12,6 +12,9 @@ void main() async {
   // Iniciar temporizador automático para autogenerar faltas a las 4:00 PM
   SyncService().iniciarTemporizadorDiarioSc();
   
+  // Iniciar monitoreo de conectividad de red para auto-sincronizar asistencias pendientes al reconectar
+  SyncService().iniciarMonitoreoConexion();
+  
   runApp(const FacialAttendanceApp());
 }
 

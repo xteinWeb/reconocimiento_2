@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:async';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'database_service.dart';
 import 'sql_server_service.dart';
 import '../models/employee.dart';
@@ -721,6 +722,30 @@ class SyncService {
       await sincronizarDesdeSqlServer();
       // Reprogramar para el siguiente día
       iniciarTemporizadorDiarioSc();
+    });
+  }
+
+  static StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
+
+  /// Monitorea la conexión de red y dispara la sincronización automática de asistencias cuando se reconecta
+  void iniciarMonitoreoConexion() {
+    if (_connectivitySubscription != null) {
+      print('[Sync] El monitoreo de conectividad ya está activo.');
+      return;
+    }
+    print('[Sync] Iniciando monitoreo de conectividad para sincronización automática...');
+    _connectivitySubscription = Connectivity().onConnectivityChanged.listen((List<ConnectivityResult> results) {
+      final hasConnection = results.any((result) => result != ConnectivityResult.none);
+      if (hasConnection) {
+        print('[Sync] Conexión de red detectada: $results. Procesando marcaciones pendientes...');
+        sincronizarAsistenciasPendientes().then((result) {
+          print('[Sync] Sincronización automática tras reconexión completa: $result');
+        }).catchError((e) {
+          print('[Sync] Error al sincronizar automáticamente tras reconexión: $e');
+        });
+      } else {
+        print('[Sync] Dispositivo sin conexión de red.');
+      }
     });
   }
 }
