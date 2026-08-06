@@ -11,7 +11,6 @@ import '../services/face_detection_service.dart';
 import '../services/face_recognition_service.dart';
 import '../services/database_service.dart';
 import '../services/light_quality_service.dart';
-import '../services/sql_server_service.dart';
 import '../services/schedule_validator.dart';
 import '../services/supervisor_auth.dart';
 import '../services/sync_service.dart';
@@ -46,7 +45,6 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   final _faceRecognition = FaceRecognitionService();
   final _database = DatabaseService();
   final _lightQuality = LightQualityService();
-  final _sqlServer = SqlServerService();
   final _syncService = SyncService();
   final _supervisor = SupervisorAuth();
 
@@ -227,205 +225,6 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       debugPrint('[Evidencia] No se pudo guardar: $e');
       return null;
     }
-  }
-
-  /// Motivo del último bypass autorizado, para guardarlo en la auditoría.
-  String? _ultimoBypassMotivo;
-
-  /// Diálogo para saltarse una validación de flujo (p. ej. salida sin entrada).
-  ///
-  /// ANTES: se auto-confirmaba a los 5 segundos. En un tótem desatendido eso
-  /// significaba que TODAS las validaciones de flujo se saltaban solas y el
-  /// control no existía en la práctica.
-  ///
-  /// AHORA: no hay temporizador. La opción por defecto es cancelar y saltarse
-  /// el control exige clave de supervisor, quedando registrado en la marcación.
-  Future<bool> _mostrarDialogoBypass(String title, String message) async {
-    if (!mounted) return false;
-
-    _ultimoBypassMotivo = null;
-
-    final quiereForzar = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF2B3A24),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: Row(
-          children: [
-            const Icon(
-              Icons.warning_amber_rounded,
-              color: Colors.amber,
-              size: 28,
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(
-                title,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              message,
-              style: const TextStyle(color: Colors.white70, fontSize: 14),
-            ),
-            const SizedBox(height: 16),
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.amber.withOpacity(0.10),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.amber.withOpacity(0.35)),
-              ),
-              child: const Row(
-                children: [
-                  Icon(Icons.lock_outline, color: Colors.amber, size: 18),
-                  SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      'Registrar de todos modos requiere clave de supervisor '
-                      'y queda auditado.',
-                      style: TextStyle(color: Colors.amber, fontSize: 12),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.white12,
-              foregroundColor: Colors.white,
-            ),
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text(
-              'Cancelar marcación',
-              style: TextStyle(fontWeight: FontWeight.bold),
-            ),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text(
-              'Registrar de todos modos',
-              style: TextStyle(color: Colors.amber),
-            ),
-          ),
-        ],
-      ),
-    );
-
-    if (quiereForzar != true || !mounted) return false;
-
-    final autorizado = await _supervisor.solicitar(
-      context,
-      titulo: 'Autorización requerida',
-      motivo: message,
-    );
-
-    if (autorizado) {
-      _ultimoBypassMotivo = title;
-    }
-    return autorizado;
-  }
-
-  Future<bool> _validarFlujoMarcacion(
-    Employee employee,
-    String selection,
-    DateTime now,
-  ) async {
-    Map<String, dynamic>? lastRecord;
-    bool isSameDay = false;
-    String? lastEvento;
-
-    // Intentar obtener el último registro global de hoy desde SQL Server
-    try {
-      lastRecord = await _sqlServer.obtenerUltimoRegistroHoy(employee.employeeCode);
-      if (lastRecord != null) {
-        isSameDay = true;
-        lastEvento = lastRecord['evento']?.toString();
-        print('[SyncFlow] Estado global desde SQL Server: $lastEvento');
-      }
-    } catch (e) {
-      print('[SyncFlow] Error al verificar flujo en servidor, usando SQLite local: $e');
-    }
-
-    // Si falló la consulta o no retornó nada, usar local SQLite
-    if (lastEvento == null) {
-      final localRecord = await _database.getLastAttendanceForEmployee(employee.id!);
-      if (localRecord != null) {
-        lastEvento = localRecord['evento']?.toString();
-        final String? lastTimestampStr = localRecord['timestamp'];
-        if (lastTimestampStr != null) {
-          final lastDateTime = DateTime.tryParse(lastTimestampStr);
-          if (lastDateTime != null) {
-            isSameDay =
-                lastDateTime.year == now.year &&
-                lastDateTime.month == now.month &&
-                lastDateTime.day == now.day;
-          }
-        }
-        if (isSameDay) {
-          print('[SyncFlow] Estado local desde SQLite: $lastEvento');
-        }
-      }
-    }
-
-    bool isValid = true;
-
-    if (selection == 'SALIDA') {
-      final bool tieneEntradaPreviaHoy =
-          isSameDay && (lastEvento == 'ENTRADA' || lastEvento == 'ENTRADA_TRASLADO');
-
-      if (!tieneEntradaPreviaHoy) {
-        isValid = await _mostrarDialogoBypass(
-          'Entrada Requerida',
-          'No se detectó un registro de ENTRADA previo el día de hoy para este colaborador.',
-        );
-      }
-    } else if (selection == 'SALIDA_TRASLADO') {
-      final bool tieneEntradaPreviaHoy =
-          isSameDay && (lastEvento == 'ENTRADA' || lastEvento == 'ENTRADA_TRASLADO');
-
-      if (!tieneEntradaPreviaHoy) {
-        isValid = await _mostrarDialogoBypass(
-          'Entrada Requerida',
-          'No se detectó un registro de ENTRADA previo el día de hoy para esta SALIDA POR TRASLADO.',
-        );
-      }
-    } else if (selection == 'ENTRADA') {
-      final bool yaTieneEntradaActiva =
-          isSameDay && (lastEvento == 'ENTRADA' || lastEvento == 'ENTRADA_TRASLADO');
-
-      if (yaTieneEntradaActiva) {
-        isValid = await _mostrarDialogoBypass(
-          'Registro Duplicado',
-          'Ya se encuentra registrada una ENTRADA activa para el día de hoy.',
-        );
-      }
-    } else if (selection == 'ENTRADA_TRASLADO') {
-      final bool vieneDeTraslado =
-          isSameDay && lastEvento == 'SALIDA_TRASLADO';
-
-      if (!vieneDeTraslado) {
-        isValid = await _mostrarDialogoBypass(
-          'Traslado no Iniciado',
-          'No se detectó una SALIDA POR TRASLADO previa en la sede de origen el día de hoy.',
-        );
-      }
-    }
-
-    return isValid;
   }
 
   void _startAutoTimer() {
@@ -704,21 +503,6 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             return;
           }
 
-          // 3. Validar marcación consecutiva (Entrada previa obligatoria para Salida)
-          final isValid = await _validarFlujoMarcacion(
-            employee,
-            selection,
-            now,
-          );
-          if (!isValid) {
-            setState(() {
-              _status = "Registro inválido para el flujo actual.";
-              _scanState = ScanState.failure;
-            });
-            _resumeAutoTimerAfterDelay();
-            return;
-          }
-
           // 4. Calcular retardo si es ENTRADA o si es salida temprana / no programado
           String tipoFinal = 'NORMAL';
           String? duracionRetardo;
@@ -782,10 +566,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             margen: margenFinal.isFinite ? margenFinal : null,
             rivalEmployeeId: rivalId,
             evidenciaPath: evidenciaPath,
-            autorizadoPor: _ultimoBypassMotivo != null ? 'SUPERVISOR' : null,
-            bypassMotivo: _ultimoBypassMotivo,
           );
-          _ultimoBypassMotivo = null;
 
           // 6. Sincronización en segundo plano con el servidor SQL Server central (offline-friendly)
           _syncService.sincronizarAsistenciasPendientes().then((result) {
@@ -1115,18 +896,6 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         return;
       }
 
-      // 3. Validar marcación consecutiva (Entrada previa obligatoria para Salida)
-      final isValid = await _validarFlujoMarcacion(employee, selection, now);
-      if (!isValid) {
-        setState(() {
-          _status = "Registro inválido para el flujo actual.";
-          _scanState = ScanState.failure;
-          _isProcessing = false;
-        });
-        _resumeAutoTimerAfterDelay();
-        return;
-      }
-
       String tipoFinal = 'NORMAL';
       String? duracionRetardo;
       String feedbackMsg = '¡Asistencia registrada!';
@@ -1174,10 +943,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         metodoRegistro: 'CEDULA',
         dispositivoId: deviceId,
         autorizadoPor: 'SUPERVISOR',
-        bypassMotivo:
-            _ultimoBypassMotivo ?? 'Marcación manual sin verificación biométrica',
+        bypassMotivo: 'Marcación manual sin verificación biométrica',
       );
-      _ultimoBypassMotivo = null;
 
       setState(() {
         _status = feedbackMsg;
@@ -1634,57 +1401,22 @@ class EventSelectionDialog extends StatefulWidget {
 }
 
 class _EventSelectionDialogState extends State<EventSelectionDialog> {
-  final _database = DatabaseService();
   Timer? _timeoutTimer;
   int _secondsRemaining = 7;
-  bool _loading = true;
-  String? _lastEvento;
-  bool _isSameDay = false;
 
   @override
   void initState() {
     super.initState();
-    _loadStateAndStartTimer();
-  }
-
-  Future<void> _loadStateAndStartTimer() async {
-    try {
-      final lastRecord = await _database.getLastAttendanceForEmployee(widget.employee.id!);
-      if (lastRecord != null) {
-        final String? lastTimestampStr = lastRecord['timestamp'];
-        if (lastTimestampStr != null) {
-          final lastDateTime = DateTime.tryParse(lastTimestampStr);
-          if (lastDateTime != null) {
-            final now = DateTime.now();
-            _isSameDay =
-                lastDateTime.year == now.year &&
-                lastDateTime.month == now.month &&
-                lastDateTime.day == now.day;
-          }
-        }
-        if (_isSameDay) {
-          _lastEvento = lastRecord['evento']?.toString();
-        }
-      }
-    } catch (e) {
-      debugPrint("Error al cargar estado del diálogo: $e");
-    } finally {
-      if (mounted) {
+    _timeoutTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (_secondsRemaining <= 1) {
+        timer.cancel();
+        if (mounted) Navigator.of(context).pop(null);
+      } else {
         setState(() {
-          _loading = false;
+          _secondsRemaining--;
         });
       }
-      _timeoutTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-        if (_secondsRemaining <= 1) {
-          timer.cancel();
-          if (mounted) Navigator.of(context).pop(null);
-        } else {
-          setState(() {
-            _secondsRemaining--;
-          });
-        }
-      });
-    }
+    });
   }
 
   @override
@@ -1696,10 +1428,6 @@ class _EventSelectionDialogState extends State<EventSelectionDialog> {
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    
-    // Calcular condiciones
-    final bool tieneEntradaActiva = _isSameDay && (_lastEvento == 'ENTRADA' || _lastEvento == 'ENTRADA_TRASLADO');
-    final bool vieneDeTraslado = _isSameDay && _lastEvento == 'SALIDA_TRASLADO';
 
     return AlertDialog(
       backgroundColor: const Color(0xFF2B3A24),
@@ -1725,21 +1453,14 @@ class _EventSelectionDialogState extends State<EventSelectionDialog> {
           ),
         ],
       ),
-      content: _loading
-          ? const SizedBox(
-              height: 100,
-              child: Center(
-                child: CircularProgressIndicator(color: Colors.amber),
-              ),
-            )
-          : Column(
+      content: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
                 const SizedBox(height: 8),
-                
-                // Mostrar ENTRADA (normal) si no tiene entrada activa y no viene de traslado
-                if (!tieneEntradaActiva && !vieneDeTraslado) ...[
-                  ElevatedButton(
+
+                // Se muestran siempre las 4 opciones: el colaborador elige
+                // libremente, sin restricción por el último registro del día.
+                ElevatedButton(
                     onPressed: () => Navigator.of(context).pop('ENTRADA'),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: Colors.tealAccent.shade700,
@@ -1766,11 +1487,9 @@ class _EventSelectionDialogState extends State<EventSelectionDialog> {
                       ],
                     ),
                   ),
-                ],
+                const SizedBox(height: 12),
 
-                // Mostrar ENTRADA EN OTRA SEDE si viene de traslado (SALIDA_TRASLADO anterior hoy)
-                if (vieneDeTraslado) ...[
-                  ElevatedButton(
+                ElevatedButton(
                     onPressed: () => Navigator.of(context).pop('ENTRADA_TRASLADO'),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: Colors.blue.shade700,
@@ -1797,11 +1516,9 @@ class _EventSelectionDialogState extends State<EventSelectionDialog> {
                       ],
                     ),
                   ),
-                ],
+                const SizedBox(height: 12),
 
-                // Mostrar SALIDA y SALIDA A OTRA SEDE si tiene entrada activa hoy
-                if (tieneEntradaActiva) ...[
-                  Row(
+                Row(
                     mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                     children: [
                       // Botón SALIDA normal
@@ -1867,7 +1584,6 @@ class _EventSelectionDialogState extends State<EventSelectionDialog> {
                       ),
                     ],
                   ),
-                ],
 
                 const SizedBox(height: 24),
                 Text(
