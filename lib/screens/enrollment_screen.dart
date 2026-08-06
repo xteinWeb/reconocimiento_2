@@ -2,7 +2,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import '../models/employee.dart';
-import '../models/face_embedding.dart';
 import '../services/camera_service.dart';
 import '../services/face_detection_service.dart';
 import '../services/face_recognition_service.dart';
@@ -208,6 +207,24 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
           return;
         }
 
+        if (result.hasCompetingFace) {
+          setState(() {
+            _status =
+                "⚠️ Hay más de una persona frente a la cámara.\n"
+                "El enrolamiento debe hacerse a solas.";
+            _isProcessing = false;
+          });
+          return;
+        }
+
+        if (result.isBlurry) {
+          setState(() {
+            _status = "⚠️ Imagen movida. Mantén la cabeza quieta un momento.";
+            _isProcessing = false;
+          });
+          return;
+        }
+
         final pose = _poses[_currentPoseIndex];
 
         // Anti-spoofing / Pose verify
@@ -219,17 +236,42 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
         });
 
         if (isPoseMatch) {
-          final cropped = await _faceDetection.cropFace(
-            file.path,
-            result.boundingBox,
-          );
-          if (cropped != null) {
-            final embedding = _faceRecognition.getEmbedding(cropped);
-            await _database.saveEmbedding(
+          // Alineación por landmarks. Si ML Kit no entregó suficientes puntos
+          // el rostro se descarta: enrolar una plantilla mal alineada arrastra
+          // el error a todas las marcaciones futuras de esta persona.
+          if (!result.isWellLandmarked) {
+            setState(() {
+              _status = "Ajustando... mantén el rostro visible y sin obstáculos.";
+              _isProcessing = false;
+            });
+            return;
+          }
+
+          final aligned = _faceDetection.alignFace(result);
+          if (aligned != null) {
+            final embedding = _faceRecognition.getEmbedding(aligned);
+
+            if (embedding == null) {
+              setState(() {
+                _status = "⚠️ Captura inválida, repitiendo...";
+                _isProcessing = false;
+              });
+              return;
+            }
+
+            final savedId = await _database.saveEmbedding(
               _employeeId!,
               embedding,
               pose['name'] as String,
             );
+
+            if (savedId <= 0) {
+              setState(() {
+                _status = "⚠️ No se pudo guardar la pose. Reintentando...";
+                _isProcessing = false;
+              });
+              return;
+            }
 
             setState(() {
               _currentPoseIndex++;
@@ -268,27 +310,18 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
     try {
       final embeddings = await _database.getEmbeddingsByEmployee(_employeeId!);
 
-      // Orden esperado por el servidor central de SQL Server
-      final expectedPoses = [
-        'Frontal',
-        'Izquierda',
-        'Derecha',
-        'Arriba',
-        'Sonrisa',
-      ];
-      final sortedPoses = <List<double>>[];
+      // Si falta alguna pose o alguna es inválida, NO se sube nada.
+      // Rellenar con vectores de ceros contaminaba el servidor central y esos
+      // ceros volvían a todos los tótems en la siguiente sincronización.
+      final sortedPoses = SyncService.ordenarPosesParaServidor(embeddings);
 
-      for (final poseName in expectedPoses) {
-        final match = embeddings.firstWhere(
-          (e) => e.angleType == poseName,
-          orElse: () => FaceEmbedding(
-            employeeId: _employeeId!,
-            embedding: List.filled(192, 0.0),
-            angleType: poseName,
-            createdAt: DateTime.now(),
-          ),
-        );
-        sortedPoses.add(match.embedding);
+      if (sortedPoses == null) {
+        setState(() {
+          _status =
+              "⚠️ Enrolamiento incompleto: faltan poses válidas.\n"
+              "Repite la captura antes de sincronizar.";
+        });
+        return;
       }
 
       final success = await _syncService.subirEnrolamiento(

@@ -44,14 +44,20 @@ class _EmployeeListScreenState extends State<EmployeeListScreen> {
   Future<void> _loadEmployees() async {
     setState(() => _isLoading = true);
     try {
-      final list = await _database.getAllEmployees();
+      // Se usa el estado VALIDADO, no el conteo crudo de filas: una plantilla
+      // corrupta o sin pose frontal no sirve para identificar, así que contarla
+      // como "enrolado" daba una falsa sensación de cobertura.
+      final estados = await _database.obtenerEstadoEnrolamiento();
+      final list = estados.map((e) => e.employee).toList();
       final counts = <int, int>{};
       final uniqueSections = <String>{};
 
-      for (final emp in list) {
+      for (final estado in estados) {
+        final emp = estado.employee;
         if (emp.id != null) {
-          final embeddings = await _database.getEmbeddingsByEmployee(emp.id!);
-          counts[emp.id!] = embeddings.length;
+          counts[emp.id!] = estado.requiereReenrolamiento
+              ? 0
+              : estado.plantillasValidas;
         }
         if (emp.department != null && emp.department!.isNotEmpty) {
           uniqueSections.add(emp.department!);

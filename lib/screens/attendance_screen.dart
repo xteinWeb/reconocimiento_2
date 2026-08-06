@@ -1,7 +1,11 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
+import 'package:image/image.dart' as img;
 import 'package:intl/intl.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import '../services/camera_service.dart';
 import '../services/face_detection_service.dart';
 import '../services/face_recognition_service.dart';
@@ -9,10 +13,25 @@ import '../services/database_service.dart';
 import '../services/light_quality_service.dart';
 import '../services/sql_server_service.dart';
 import '../services/schedule_validator.dart';
+import '../services/supervisor_auth.dart';
 import '../services/sync_service.dart';
 import '../models/employee.dart';
 
 enum ScanState { idle, success, failure }
+
+/// Claves de configuración de reconocimiento (compartidas con el calibrador).
+const String kCfgUmbral = 'recognition_threshold';
+const String kCfgMargen = 'recognition_margin';
+const String kCfgVotos = 'recognition_votes';
+
+/// Valores por defecto conservadores.
+///
+/// Son un punto de partida, NO un valor correcto: el umbral bueno depende del
+/// modelo, la cámara, la iluminación de la sede y de cuán parecidas son las
+/// personas de la plantilla. Usa el calibrador para fijarlos con datos reales.
+const double kUmbralPorDefecto = 0.20;
+const double kMargenPorDefecto = 0.06;
+const int kVotosPorDefecto = 3;
 
 class AttendanceScreen extends StatefulWidget {
   const AttendanceScreen({super.key});
@@ -29,12 +48,38 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   final _lightQuality = LightQualityService();
   final _sqlServer = SqlServerService();
   final _syncService = SyncService();
+  final _supervisor = SupervisorAuth();
 
-  double _threshold = 0.22;
+  // --- Parámetros de decisión -----------------------------------------
+  // Estos tres valores definen juntos la tasa de falsos positivos.
+  // El calibrador (Configuración → Calibrar reconocimiento) los deriva de la
+  // galería real en lugar de dejarlos a criterio manual.
+  double _threshold = kUmbralPorDefecto;
+  double _margin = kMargenPorDefecto;
+  int _requiredVotes = kVotosPorDefecto;
+
   int _minFaceSize = 130;
   double _centerTolerance = 0.15;
-  int? _lastMatchedId;
-  int _consecutiveMatchCount = 0;
+
+  // --- Votación multi-frame -------------------------------------------
+  int? _voteEmployeeId;
+  int _voteCount = 0;
+  DateTime? _voteLastAt;
+  double _voteBestDistance = double.infinity;
+  double _voteMinMargin = double.infinity;
+
+  /// Ventana máxima entre votos consecutivos. Si la persona se va y llega
+  /// otra, los votos viejos caducan en lugar de sumarse.
+  static const Duration _voteWindow = Duration(seconds: 6);
+
+  // --- Galería en memoria ---------------------------------------------
+  // Se construye una sola vez (no en cada frame): parsear y validar miles de
+  // vectores por captura era lento y repetía el mismo trabajo.
+  List<GalleryTemplate> _gallery = const [];
+  DateTime? _galleryBuiltAt;
+  int _galleryEmployees = 0;
+  int _galleryRejected = 0;
+  static const Duration _galleryTtl = Duration(minutes: 3);
 
   String _status = "Mira a la cámara para marcar";
   String _lightStatus = "";
@@ -56,6 +101,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   Future<void> _initialize() async {
     await _loadConfigs();
+    await _refreshGallery(force: true);
     await _cameraService.initialize();
     await _faceRecognition.initialize();
     if (mounted) {
@@ -68,127 +114,229 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   Future<void> _loadConfigs() async {
     try {
-      final tStr = await _database.getConfig('recognition_threshold');
+      final tStr = await _database.getConfig(kCfgUmbral);
+      final mStr = await _database.getConfig(kCfgMargen);
+      final vStr = await _database.getConfig(kCfgVotos);
       final sStr = await _database.getConfig('min_face_size');
       final cStr = await _database.getConfig('center_tolerance');
 
+      if (!mounted) return;
       setState(() {
-        if (tStr != null) _threshold = double.tryParse(tStr) ?? 0.22;
-        if (sStr != null) _minFaceSize = int.tryParse(sStr) ?? 130;
-        if (cStr != null) _centerTolerance = double.tryParse(cStr) ?? 0.15;
+        _threshold = double.tryParse(tStr ?? '') ?? kUmbralPorDefecto;
+        _margin = double.tryParse(mStr ?? '') ?? kMargenPorDefecto;
+        _requiredVotes = (int.tryParse(vStr ?? '') ?? kVotosPorDefecto).clamp(
+          1,
+          5,
+        );
+        _minFaceSize = int.tryParse(sStr ?? '') ?? 130;
+        _centerTolerance = double.tryParse(cStr ?? '') ?? 0.15;
       });
     } catch (e) {
-      debugPrint("Error al cargar configuraciones: $e");
+      // Ante un fallo de lectura NO se hereda un valor permisivo: se usan
+      // los valores por defecto conservadores definidos arriba.
+      debugPrint("Error al cargar configuraciones, usando defaults: $e");
     }
   }
 
-  Future<bool> _mostrarDialogoBypass(
-    String title,
-    String message,
+  /// Reconstruye la galería de plantillas frontales validadas.
+  Future<void> _refreshGallery({bool force = false}) async {
+    final builtAt = _galleryBuiltAt;
+    if (!force &&
+        builtAt != null &&
+        DateTime.now().difference(builtAt) < _galleryTtl) {
+      return;
+    }
+
+    try {
+      final rows = await _database.getAllEmbeddings();
+      final built = FaceRecognitionService.buildGallery(rows, frontalOnly: true);
+
+      _gallery = built.templates;
+      _galleryBuiltAt = DateTime.now();
+      _galleryEmployees = built.enrolledEmployeeIds.length;
+      _galleryRejected = built.rejectedCount;
+
+      debugPrint(
+        '[Galería] ${_gallery.length} plantillas frontales de '
+        '$_galleryEmployees colaboradores. '
+        'Descartadas por inválidas: $_galleryRejected.',
+      );
+    } catch (e) {
+      debugPrint('[Galería] Error al construir: $e');
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Votación multi-frame
+  // ------------------------------------------------------------------
+
+  void _resetVotes() {
+    _voteEmployeeId = null;
+    _voteCount = 0;
+    _voteLastAt = null;
+    _voteBestDistance = double.infinity;
+    _voteMinMargin = double.infinity;
+  }
+
+  /// Registra una identificación aceptada y devuelve true si ya se alcanzó el
+  /// número de votos coincidentes exigido.
+  ///
+  /// Cada voto proviene de una captura independiente. Un falso positivo
+  /// puntual no acumula; para pasar, el sistema tiene que identificar a la
+  /// MISMA persona varias veces seguidas, cada vez superando umbral y margen.
+  bool _registerVote(IdentificationResult r) {
+    final now = DateTime.now();
+
+    final expired =
+        _voteLastAt != null && now.difference(_voteLastAt!) > _voteWindow;
+
+    if (expired || _voteEmployeeId != r.employeeId) {
+      _voteEmployeeId = r.employeeId;
+      _voteCount = 1;
+      _voteBestDistance = r.distance;
+      _voteMinMargin = r.margin;
+    } else {
+      _voteCount++;
+      _voteBestDistance = r.distance < _voteBestDistance
+          ? r.distance
+          : _voteBestDistance;
+      _voteMinMargin = r.margin < _voteMinMargin ? r.margin : _voteMinMargin;
+    }
+
+    _voteLastAt = now;
+    return _voteCount >= _requiredVotes;
+  }
+
+  /// Guarda el rostro alineado como evidencia auditable de la marcación.
+  Future<String?> _guardarEvidencia(
+    img.Image alignedImage,
+    String employeeCode,
+    DateTime when,
   ) async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final evidenceDir = Directory(p.join(dir.path, 'evidencias'));
+      if (!await evidenceDir.exists()) {
+        await evidenceDir.create(recursive: true);
+      }
+      final stamp = DateFormat('yyyyMMdd_HHmmss').format(when);
+      final file = File(p.join(evidenceDir.path, '${employeeCode}_$stamp.jpg'));
+      await file.writeAsBytes(_faceDetection.encodeEvidence(alignedImage));
+      return file.path;
+    } catch (e) {
+      debugPrint('[Evidencia] No se pudo guardar: $e');
+      return null;
+    }
+  }
+
+  /// Motivo del último bypass autorizado, para guardarlo en la auditoría.
+  String? _ultimoBypassMotivo;
+
+  /// Diálogo para saltarse una validación de flujo (p. ej. salida sin entrada).
+  ///
+  /// ANTES: se auto-confirmaba a los 5 segundos. En un tótem desatendido eso
+  /// significaba que TODAS las validaciones de flujo se saltaban solas y el
+  /// control no existía en la práctica.
+  ///
+  /// AHORA: no hay temporizador. La opción por defecto es cancelar y saltarse
+  /// el control exige clave de supervisor, quedando registrado en la marcación.
+  Future<bool> _mostrarDialogoBypass(String title, String message) async {
     if (!mounted) return false;
 
-    bool? result = await showDialog<bool>(
+    _ultimoBypassMotivo = null;
+
+    final quiereForzar = await showDialog<bool>(
       context: context,
       barrierDismissible: false,
-      builder: (context) {
-        int secondsRemaining = 5;
-        Timer? timer;
-
-        return StatefulBuilder(
-          builder: (context, setState) {
-            // Iniciar el temporizador si no está activo
-            timer ??= Timer.periodic(const Duration(seconds: 1), (t) {
-              if (secondsRemaining > 1) {
-                if (context.mounted) {
-                  setState(() {
-                    secondsRemaining--;
-                  });
-                }
-              } else {
-                t.cancel();
-                if (context.mounted) {
-                  Navigator.of(context).pop(true); // Auto-confirmar
-                }
-              }
-            });
-
-            return AlertDialog(
-              backgroundColor: const Color(0xFF2B3A24),
-              title: Row(
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF2B3A24),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(
+          children: [
+            const Icon(
+              Icons.warning_amber_rounded,
+              color: Colors.amber,
+              size: 28,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                title,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              message,
+              style: const TextStyle(color: Colors.white70, fontSize: 14),
+            ),
+            const SizedBox(height: 16),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.amber.withOpacity(0.10),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.amber.withOpacity(0.35)),
+              ),
+              child: const Row(
                 children: [
-                  const Icon(Icons.warning_amber_rounded, color: Colors.amber, size: 28),
-                  const SizedBox(width: 10),
+                  Icon(Icons.lock_outline, color: Colors.amber, size: 18),
+                  SizedBox(width: 10),
                   Expanded(
                     child: Text(
-                      title,
-                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                      'Registrar de todos modos requiere clave de supervisor '
+                      'y queda auditado.',
+                      style: TextStyle(color: Colors.amber, fontSize: 12),
                     ),
                   ),
                 ],
               ),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    message,
-                    style: const TextStyle(color: Colors.white70, fontSize: 14),
-                  ),
-                  const SizedBox(height: 20),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          valueColor: AlwaysStoppedAnimation<Color>(Colors.amber),
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Text(
-                        'Registrando automáticamente en ${secondsRemaining}s...',
-                        style: const TextStyle(color: Colors.amber, fontSize: 13, fontWeight: FontWeight.bold),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () {
-                    timer?.cancel();
-                    Navigator.of(context).pop(false); // Cancelar
-                  },
-                  child: const Text(
-                    'Cancelar',
-                    style: TextStyle(color: Colors.white60),
-                  ),
-                ),
-                ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.amber,
-                    foregroundColor: const Color(0xFF2B3A24),
-                  ),
-                  onPressed: () {
-                    timer?.cancel();
-                    Navigator.of(context).pop(true); // Registrar de todos modos
-                  },
-                  child: const Text(
-                    'Registrar de todos modos',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                ),
-              ],
-            );
-          },
-        );
-      },
+            ),
+          ],
+        ),
+        actions: [
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.white12,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text(
+              'Cancelar marcación',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text(
+              'Registrar de todos modos',
+              style: TextStyle(color: Colors.amber),
+            ),
+          ),
+        ],
+      ),
     );
 
-    return result ?? false;
+    if (quiereForzar != true || !mounted) return false;
+
+    final autorizado = await _supervisor.solicitar(
+      context,
+      titulo: 'Autorización requerida',
+      motivo: message,
+    );
+
+    if (autorizado) {
+      _ultimoBypassMotivo = title;
+    }
+    return autorizado;
   }
 
   Future<bool> _validarFlujoMarcacion(
@@ -282,10 +430,105 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   void _startAutoTimer() {
     _autoTimer?.cancel();
-    _autoTimer = Timer.periodic(
-      const Duration(milliseconds: 700),
-      (_) => _markAttendance(),
+    if (!_isAutoMode || !mounted || _scanState != ScanState.idle) return;
+    _autoTimer = Timer(
+      const Duration(milliseconds: 500),
+      () => _markAttendance(),
     );
+  }
+
+  /// Una captura completa: foto → calidad → detección → alineación →
+  /// embedding → identificación. No decide nada, solo reporta.
+  Future<_ScanOutcome> _captureAndIdentify() async {
+    final file = await _cameraService.takePicture();
+    if (file == null) {
+      return const _ScanOutcome.discarded(null, resetVotes: false);
+    }
+
+    // --- Calidad de luz ---
+    final bytes = await file.readAsBytes();
+    final lightResult = _lightQuality.analyzeImage(bytes);
+    if (mounted) {
+      setState(() {
+        _lightStatus = lightResult.feedback;
+        _lightColor = lightResult.feedbackColor;
+      });
+    }
+    if (lightResult.isOverexposed ||
+        lightResult.isBacklit ||
+        lightResult.isTooDark) {
+      return _ScanOutcome.discarded(lightResult.feedback);
+    }
+
+    // --- Detección y encuadre ---
+    final detection = await _faceDetection.detectFace(
+      file.path,
+      minFaceSize: _minFaceSize,
+      centerTolerancePercentage: _centerTolerance,
+    );
+
+    if (detection == null) {
+      return const _ScanOutcome.discarded(
+        "Buscando rostro...",
+        resetVotes: false,
+      );
+    }
+
+    if (detection.hasCompetingFace) {
+      return const _ScanOutcome.discarded(
+        "⚠️ Hay más de una persona frente a la cámara.\n"
+        "Acércate solo tú para marcar.",
+      );
+    }
+    if (detection.isNotCentered) {
+      return const _ScanOutcome.discarded(
+        "⚠️ Por favor, centra tu rostro en el círculo.",
+      );
+    }
+    if (detection.isTooSmall) {
+      return const _ScanOutcome.discarded(
+        "⚠️ Por favor, acércate más a la pantalla.",
+      );
+    }
+    if (detection.yaw.abs() > 15.0 || detection.pitch.abs() > 15.0) {
+      return const _ScanOutcome.discarded(
+        "⚠️ Por favor, mira de frente a la pantalla.",
+      );
+    }
+    if (detection.isBlurry) {
+      // Un rostro borroso produce un embedding degradado que se acerca al
+      // promedio poblacional: es una de las fuentes principales de falsos
+      // positivos. Se descarta el frame en lugar de arriesgar la marcación.
+      return const _ScanOutcome.discarded(
+        "⚠️ Imagen movida. Mantente quieto un momento.",
+      );
+    }
+    if (!detection.isWellLandmarked) {
+      return const _ScanOutcome.discarded(
+        "⚠️ Rostro parcialmente cubierto. Despeja la cara.",
+      );
+    }
+
+    // --- Alineación y embedding ---
+    final aligned = _faceDetection.alignFace(detection);
+    if (aligned == null) {
+      return const _ScanOutcome.discarded("Ajustando encuadre...");
+    }
+
+    final embedding = _faceRecognition.getEmbedding(aligned);
+    if (embedding == null) {
+      return const _ScanOutcome.discarded("Ajustando encuadre...");
+    }
+
+    // --- Identificación con umbral Y margen ---
+    final result = _faceRecognition.identify(
+      embedding,
+      _gallery,
+      threshold: _threshold,
+      margin: _margin,
+    );
+
+    return _ScanOutcome.identified(result, aligned);
   }
 
   Future<void> _markAttendance() async {
@@ -296,158 +539,105 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     });
 
     try {
-      final file = await _cameraService.takePicture();
-      if (file == null) {
-        setState(() => _isProcessing = false);
-        return;
-      }
+      await _refreshGallery();
 
-      final bytes = await file.readAsBytes();
-      final lightResult = _lightQuality.analyzeImage(bytes);
-
-      setState(() {
-        _lightStatus = lightResult.feedback;
-        _lightColor = lightResult.feedbackColor;
-      });
-
-      if (lightResult.isOverexposed ||
-          lightResult.isBacklit ||
-          lightResult.isTooDark) {
+      if (_gallery.isEmpty) {
+        _resetVotes();
         setState(() {
-          _status = lightResult.feedback;
-          _isProcessing = false;
-        });
-        return;
-      }
-
-      final detection = await _faceDetection.detectFace(
-        file.path,
-        minFaceSize: _minFaceSize,
-        centerTolerancePercentage: _centerTolerance,
-      );
-      if (detection == null) {
-        setState(() {
-          _status = "Buscando rostro...";
-          _isProcessing = false;
-          _consecutiveMatchCount = 0;
-          _lastMatchedId = null;
-        });
-        return;
-      }
-
-      if (detection.isNotCentered) {
-        setState(() {
-          _status = "⚠️ Por favor, centra tu rostro en el círculo.";
-          _isProcessing = false;
-          _consecutiveMatchCount = 0;
-          _lastMatchedId = null;
-        });
-        return;
-      }
-
-      if (detection.isTooSmall) {
-        setState(() {
-          _status = "⚠️ Por favor, acércate más a la pantalla.";
-          _isProcessing = false;
-          _consecutiveMatchCount = 0;
-          _lastMatchedId = null;
-        });
-        return;
-      }
-
-      // Validar que la persona esté mirando de frente a la cámara (frontal) para evitar falsos positivos
-      if (detection.yaw.abs() > 15.0 || detection.pitch.abs() > 15.0) {
-        setState(() {
-          _status = "⚠️ Por favor, mira de frente a la pantalla.";
-          _isProcessing = false;
-          _consecutiveMatchCount = 0;
-          _lastMatchedId = null;
-        });
-        return;
-      }
-
-      final cropped = await _faceDetection.cropFace(
-        file.path,
-        detection.boundingBox,
-      );
-      if (cropped == null) {
-        setState(() {
-          _status = "Ajustando encuadre...";
-          _isProcessing = false;
-          _consecutiveMatchCount = 0;
-          _lastMatchedId = null;
-        });
-        return;
-      }
-
-      final currentEmbedding = _faceRecognition.getEmbedding(cropped);
-      final allEmbeddings = await _database.getAllEmbeddings();
-
-      if (allEmbeddings.isEmpty) {
-        setState(() {
-          _status = "No hay colaboradores enrolados en el dispositivo.";
+          _status = _galleryRejected > 0
+              ? "Galería biométrica sin plantillas válidas "
+                    "($_galleryRejected descartadas). Requiere re-enrolamiento."
+              : "No hay colaboradores enrolados en el dispositivo.";
           _scanState = ScanState.failure;
           _isProcessing = false;
-          _consecutiveMatchCount = 0;
-          _lastMatchedId = null;
         });
         return;
       }
 
-      final (matchedId, distance) = _faceRecognition.findNearest(
-        currentEmbedding,
-        allEmbeddings,
-      );
+      // En modo automático cada tick del temporizador aporta un voto.
+      // En modo manual una sola pulsación toma la ráfaga completa, para no
+      // obligar al colaborador a pulsar el botón varias veces.
+      final int maxCapturas = _isAutoMode ? 1 : _requiredVotes + 2;
 
-      /*
-      // Obtener las 3 mejores coincidencias para depuración/testing
-      final topMatchesRaw = _faceRecognition.findTopMatches(
-        currentEmbedding,
-        allEmbeddings,
-        limit: 3,
-      );
+      _ScanOutcome? ultima;
+      bool confirmado = false;
 
-      final List<Map<String, dynamic>> resolvedMatches = [];
-      for (final match in topMatchesRaw) {
-        final empId = match.$1;
-        final dist = match.$2;
-        final employee = await _database.getEmployeeById(empId);
-        if (employee != null) {
-          resolvedMatches.add({'employee': employee, 'distance': dist});
+      for (int i = 0; i < maxCapturas && !confirmado; i++) {
+        if (!mounted) return;
+        final outcome = await _captureAndIdentify();
+        ultima = outcome;
+
+        if (!outcome.isUsable) {
+          if (outcome.resetVotes) _resetVotes();
+          final feedback = outcome.feedback;
+          if (feedback != null && mounted) {
+            setState(() => _status = feedback);
+          }
+          if (_isAutoMode) {
+            setState(() => _isProcessing = false);
+            return;
+          }
+          continue;
+        }
+
+        final r = outcome.identification!;
+        debugPrint('[Reconocimiento] ${r.debugLine}');
+
+        if (!r.accepted) {
+          // Rechazo por umbral o por margen insuficiente: la votación se
+          // reinicia por completo. Un intento dudoso nunca acumula.
+          _resetVotes();
+          debugPrint('[Reconocimiento] Rechazado: ${r.rejectionReason}');
+          if (_isAutoMode) break;
+          continue;
+        }
+
+        confirmado = _registerVote(r);
+
+        if (!confirmado && mounted) {
+          setState(() {
+            _status = "Confirmando identidad... ($_voteCount/$_requiredVotes)";
+          });
+          if (!_isAutoMode) {
+            await Future.delayed(const Duration(milliseconds: 300));
+          }
         }
       }
 
-      setState(() {
-        _topMatches = resolvedMatches;
-      });
-      */
-
-      debugPrint(
-        '[FaceRecognition] ID detectado: $matchedId, Distancia calculada: ${distance.toStringAsFixed(4)}',
-      );
-
-      if (distance < _threshold && matchedId != null) {
+      if (!confirmado) {
         if (_isAutoMode) {
-          if (_lastMatchedId == matchedId) {
-            _consecutiveMatchCount++;
-          } else {
-            _lastMatchedId = matchedId;
-            _consecutiveMatchCount = 1;
-          }
-
-          if (_consecutiveMatchCount < 3) {
-            setState(() {
-              _status = "Confirmando identidad... (${_consecutiveMatchCount}/3)";
-              _isProcessing = false;
-            });
-            return;
-          }
+          setState(() {
+            if (_voteCount == 0) _status = "Mira a la cámara para marcar";
+            _isProcessing = false;
+          });
+        } else {
+          setState(() {
+            _scanState = ScanState.failure;
+            _status = "Rostro no reconocido con la certeza requerida.";
+            _isProcessing = false;
+          });
+          Future.delayed(const Duration(seconds: 2), () {
+            if (mounted && _scanState == ScanState.failure) {
+              setState(() {
+                _scanState = ScanState.idle;
+                _status = "Presiona Marcar para escanear";
+                _topMatches = [];
+              });
+            }
+          });
         }
+        return;
+      }
 
-        // Si llegó a 3 o es modo manual, resetear para la marcación
-        _consecutiveMatchCount = 0;
-        _lastMatchedId = null;
+      // ---------------- Identidad confirmada ----------------
+      final matchedId = _voteEmployeeId!;
+      final distance = _voteBestDistance;
+      final margenFinal = _voteMinMargin;
+      final rivalId = ultima?.identification?.runnerUpEmployeeId;
+      final rostroAlineado = ultima?.aligned;
+      _resetVotes();
 
+      {
         final employee = await _database.getEmployeeById(matchedId);
         if (employee != null) {
           // 1. Pausar el temporizador automático temporalmente para no acumular fotos
@@ -565,8 +755,21 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             }
           }
 
-          // 5. Guardar localmente en SQLite
+          // 5. Guardar localmente en SQLite con rastro auditable completo:
+          //    distancia, margen contra el segundo candidato, quién era ese
+          //    candidato, la foto del rostro que produjo la decisión y, si
+          //    hubo bypass, quién lo autorizó y por qué.
           final deviceId = await _database.getDeviceId();
+
+          String? evidenciaPath;
+          if (rostroAlineado != null) {
+            evidenciaPath = await _guardarEvidencia(
+              rostroAlineado,
+              employee.employeeCode,
+              now,
+            );
+          }
+
           final recordId = await _database.insertAttendance(
             matchedId,
             now,
@@ -576,7 +779,13 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             duracion: duracionRetardo,
             isSynced: 0,
             dispositivoId: deviceId,
+            margen: margenFinal.isFinite ? margenFinal : null,
+            rivalEmployeeId: rivalId,
+            evidenciaPath: evidenciaPath,
+            autorizadoPor: _ultimoBypassMotivo != null ? 'SUPERVISOR' : null,
+            bypassMotivo: _ultimoBypassMotivo,
           );
+          _ultimoBypassMotivo = null;
 
           // 6. Sincronización en segundo plano con el servidor SQL Server central (offline-friendly)
           _syncService.sincronizarAsistenciasPendientes().then((result) {
@@ -602,36 +811,15 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             }
           });
         }
-      } else {
-        setState(() {
-          _consecutiveMatchCount = 0;
-          _lastMatchedId = null;
-        });
-
-        if (!_isAutoMode) {
-          setState(() {
-            _scanState = ScanState.failure;
-            _status = "Rostro no reconocido.";
-          });
-          Future.delayed(const Duration(seconds: 2), () {
-            if (mounted && _scanState == ScanState.failure) {
-              setState(() {
-                _scanState = ScanState.idle;
-                _status = "Presiona Marcar para escanear";
-                _topMatches = [];
-              });
-            }
-          });
-        } else {
-          setState(() {
-            _status = "Mira a la cámara para marcar";
-          });
-        }
       }
     } catch (e) {
+      _resetVotes();
       setState(() => _status = "Error: $e");
     } finally {
       setState(() => _isProcessing = false);
+      if (_isAutoMode && mounted && _scanState == ScanState.idle) {
+        _startAutoTimer();
+      }
     }
   }
 
@@ -732,6 +920,34 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   Future<void> _marcarConCedula() async {
     _autoTimer?.cancel();
+
+    // La marcación por cédula NO verifica identidad: quien la usa solo tiene
+    // que conocer un número. Sin control era el mayor hueco de fraude del
+    // sistema — mayor que cualquier falso positivo del reconocimiento, porque
+    // permitía a cualquiera marcarle la asistencia a un compañero ausente.
+    // Ahora es un respaldo que exige un supervisor presente y queda auditado.
+    final autorizado = await _supervisor.solicitar(
+      context,
+      titulo: 'Marcación manual por cédula',
+      motivo:
+          'Este método no verifica la identidad del colaborador. '
+          'Úsalo solo cuando el reconocimiento facial falle y puedas '
+          'confirmar en persona quién está marcando.',
+    );
+
+    if (!autorizado) {
+      if (mounted) {
+        setState(() {
+          _status = _isAutoMode
+              ? "Mira a la cámara para marcar"
+              : "Presiona Marcar para escanear";
+        });
+      }
+      _resumeAutoTimerAfterDelay();
+      return;
+    }
+
+    if (!mounted) return;
 
     final controller = TextEditingController();
     final formKey = GlobalKey<FormState>();
@@ -932,7 +1148,11 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         isSynced: 0,
         metodoRegistro: 'CEDULA',
         dispositivoId: deviceId,
+        autorizadoPor: 'SUPERVISOR',
+        bypassMotivo:
+            _ultimoBypassMotivo ?? 'Marcación manual sin verificación biométrica',
       );
+      _ultimoBypassMotivo = null;
 
       setState(() {
         _status = feedbackMsg;
@@ -1060,13 +1280,13 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                 ),
 
                 // Progreso de confirmación multicuadro
-                if (_consecutiveMatchCount > 0 && _scanState == ScanState.idle)
+                if (_voteCount > 0 && _scanState == ScanState.idle)
                   Center(
                     child: SizedBox(
                       width: 263,
                       height: 263,
                       child: CircularProgressIndicator(
-                        value: _consecutiveMatchCount / 3.0,
+                        value: _voteCount / _requiredVotes,
                         strokeWidth: 5,
                         valueColor: const AlwaysStoppedAnimation<Color>(Colors.cyanAccent),
                         backgroundColor: Colors.transparent,
@@ -1215,8 +1435,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                         100.0,
                       );
 
-                      // Highlight if it's below the threshold (recognized)
-                      final isMatch = distance < 0.35;
+                      // Resaltar solo si supera el umbral REAL en uso.
+                      final isMatch = distance < _threshold;
 
                       return Container(
                         margin: const EdgeInsets.symmetric(vertical: 4),
@@ -1352,6 +1572,32 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     _faceRecognition.dispose();
     super.dispose();
   }
+}
+
+/// Resultado de UNA captura. Separa "el frame no sirve" de "el frame sirve y
+/// esto es lo que dijo el reconocedor", para que la política de votación viva
+/// en un único sitio.
+class _ScanOutcome {
+  final IdentificationResult? identification;
+  final img.Image? aligned;
+  final String? feedback;
+
+  /// Si el descarte debe invalidar los votos acumulados. Los descartes
+  /// transitorios (no hay rostro todavía) no rompen una secuencia en curso;
+  /// los que indican un cambio de condiciones sí.
+  final bool resetVotes;
+
+  const _ScanOutcome.identified(
+    IdentificationResult this.identification,
+    img.Image this.aligned,
+  )   : feedback = null,
+        resetVotes = false;
+
+  const _ScanOutcome.discarded(this.feedback, {this.resetVotes = true})
+      : identification = null,
+        aligned = null;
+
+  bool get isUsable => identification != null;
 }
 
 class EventSelectionDialog extends StatefulWidget {

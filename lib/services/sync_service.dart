@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:async';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'database_service.dart';
+import 'face_recognition_service.dart';
 import 'sql_server_service.dart';
 import '../models/employee.dart';
 import '../models/face_embedding.dart';
@@ -145,35 +146,62 @@ class SyncService {
           final List<double> vector = rawVector.map((e) => (e as num).toDouble()).toList();
 
           if (vector.isNotEmpty) {
-            // Limpiar embeddings anteriores para evitar duplicados
-            final db = await _database.database;
-            await db.delete('face_embeddings', where: 'employee_id = ?', whereArgs: [employeeId]);
+            const int dim = FaceRecognitionService.embeddingSize; // 192
+            const poses = ['Frontal', 'Izquierda', 'Derecha', 'Arriba', 'Sonrisa'];
 
-            // Si es multi-pose de 5 poses (960 elementos)
-            if (vector.length == 960) {
-              final poses = ['Frontal', 'Izquierda', 'Derecha', 'Arriba', 'Sonrisa'];
-              for (int i = 0; i < 5; i++) {
-                final chunk = vector.sublist(i * 192, (i + 1) * 192);
-                await _database.saveEmbedding(employeeId, chunk, poses[i]);
-              }
-              print('[Sync] Cargadas 5 poses biométricas para: $nombre');
-            } else if (vector.length == 192) {
-              // Pose única
-              await _database.saveEmbedding(employeeId, vector, 'Frontal');
-              print('[Sync] Cargada pose biométrica única para: $nombre');
+            // Solo aceptamos vectores del modelo actual. Un vector de otra
+            // dimensión NO es comparable con nuestros embeddings: guardarlo
+            // "por compatibilidad" solo contamina la galería y produce
+            // errores o coincidencias sin sentido. Se descarta y se marca
+            // al empleado como pendiente de re-enrolamiento.
+            if (vector.length != dim && vector.length != dim * 5) {
+              print(
+                '[Sync] Vector de dimensión ${vector.length} DESCARTADO para '
+                '$nombre ($cedula). El modelo actual usa $dim. '
+                'Requiere re-enrolamiento.',
+              );
             } else {
-              // Si es un vector de otro modelo (por ejemplo, 128 o 640 dimensiones)
-              // Se guarda en SQLite para mantener compatibilidad pero se advierte que requiere re-enrolamiento
-              if (vector.length == 640) {
-                final poses = ['Frontal', 'Izquierda', 'Derecha', 'Arriba', 'Sonrisa'];
+              // Limpiar embeddings anteriores para evitar duplicados
+              final db = await _database.database;
+              await db.delete('face_embeddings',
+                  where: 'employee_id = ?', whereArgs: [employeeId]);
+
+              int guardados = 0;
+              int descartados = 0;
+
+              if (vector.length == dim * 5) {
                 for (int i = 0; i < 5; i++) {
-                  final chunk = vector.sublist(i * 128, (i + 1) * 128);
-                  await _database.saveEmbedding(employeeId, chunk, poses[i]);
+                  final chunk = vector.sublist(i * dim, (i + 1) * dim);
+                  // saveEmbedding normaliza y rechaza ceros/NaN por sí solo.
+                  final id = await _database.saveEmbedding(
+                      employeeId, chunk, poses[i]);
+                  if (id > 0) {
+                    guardados++;
+                  } else {
+                    descartados++;
+                  }
                 }
-              } else if (vector.length == 128) {
-                await _database.saveEmbedding(employeeId, vector, 'Frontal');
+              } else {
+                final id =
+                    await _database.saveEmbedding(employeeId, vector, 'Frontal');
+                if (id > 0) {
+                  guardados++;
+                } else {
+                  descartados++;
+                }
               }
-              print('[Sync] Vector de dimensión alternativa (${vector.length}) cargado para $nombre. Puede requerir re-enrolamiento.');
+
+              print(
+                '[Sync] $nombre ($cedula): $guardados poses válidas cargadas'
+                '${descartados > 0 ? ", $descartados descartadas (vector nulo o corrupto)" : ""}.',
+              );
+
+              if (guardados == 0) {
+                print(
+                  '[Sync] ATENCIÓN: $nombre ($cedula) quedó SIN plantilla '
+                  'biométrica utilizable. No podrá marcar por rostro.',
+                );
+              }
             }
           }
         } catch (e) {
@@ -321,27 +349,19 @@ class SyncService {
           continue;
         }
 
-        // Orden esperado por el servidor central de SQL Server
-        final expectedPoses = [
-          'Frontal',
-          'Izquierda',
-          'Derecha',
-          'Arriba',
-          'Sonrisa',
-        ];
-        final sortedPoses = <List<double>>[];
-
-        for (final poseName in expectedPoses) {
-          final match = embeddings.firstWhere(
-            (e) => e.angleType == poseName,
-            orElse: () => FaceEmbedding(
-              employeeId: employee.id!,
-              embedding: List.filled(192, 0.0),
-              angleType: poseName,
-              createdAt: DateTime.now(),
-            ),
+        // Orden esperado por el servidor central de SQL Server.
+        //
+        // Antes, una pose faltante se rellenaba con un vector de 192 ceros.
+        // Ese relleno viajaba al servidor central y volvía a TODOS los tótems
+        // en la siguiente sincronización, contaminando la galería. Ahora un
+        // enrolamiento incompleto simplemente no se sube.
+        final sortedPoses = _ordenarPosesParaServidor(embeddings);
+        if (sortedPoses == null) {
+          print(
+            '[Sync] Enrolamiento de ${employee.name} INCOMPLETO o con vectores '
+            'inválidos. No se sube al servidor; debe repetirse la captura.',
           );
-          sortedPoses.add(match.embedding);
+          continue;
         }
 
         final success = await subirEnrolamiento(
@@ -364,6 +384,49 @@ class SyncService {
     }
   }
 
+  /// Orden canónico de las 5 poses que espera el servidor central.
+  static const List<String> posesEsperadas = [
+    'Frontal',
+    'Izquierda',
+    'Derecha',
+    'Arriba',
+    'Sonrisa',
+  ];
+
+  /// Ordena las poses en el formato del servidor, validando cada vector.
+  ///
+  /// Devuelve `null` si falta alguna pose o si alguna es inválida, en lugar de
+  /// rellenar con ceros. Un vector de ceros propagado al servidor central
+  /// termina replicándose a todos los tótems.
+  static List<List<double>>? ordenarPosesParaServidor(
+    List<FaceEmbedding> embeddings,
+  ) {
+    final ordenadas = <List<double>>[];
+
+    for (final poseName in posesEsperadas) {
+      FaceEmbedding? match;
+      for (final e in embeddings) {
+        if (e.angleType == poseName) {
+          match = e;
+          break;
+        }
+      }
+      if (match == null) return null;
+
+      final clean = FaceRecognitionService.sanitize(match.embedding);
+      if (clean == null) return null;
+
+      ordenadas.add(clean);
+    }
+
+    return ordenadas;
+  }
+
+  static List<List<double>>? _ordenarPosesParaServidor(
+    List<FaceEmbedding> embeddings,
+  ) =>
+      ordenarPosesParaServidor(embeddings);
+
   /// Sube un colaborador recién enrolado localmente hacia SQL Server central
   Future<bool> subirEnrolamiento({
     required String cedula,
@@ -373,8 +436,34 @@ class SyncService {
     String? horarioId,
   }) async {
     try {
-      // Unificar las 5 poses en un vector plano de 960
-      final combinedVector = poses.expand((p) => p).toList();
+      const int dim = FaceRecognitionService.embeddingSize;
+
+      // Barrera final: nunca subir un enrolamiento incompleto o corrupto.
+      if (poses.length != posesEsperadas.length) {
+        print(
+          '[Sync] subirEnrolamiento abortado para $cedula: se esperaban '
+          '${posesEsperadas.length} poses y llegaron ${poses.length}.',
+        );
+        return false;
+      }
+      for (int i = 0; i < poses.length; i++) {
+        if (FaceRecognitionService.sanitize(poses[i]) == null) {
+          print(
+            '[Sync] subirEnrolamiento abortado para $cedula: la pose '
+            '"${posesEsperadas[i]}" es inválida (dim=${poses[i].length} '
+            'o vector nulo).',
+          );
+          return false;
+        }
+      }
+
+      // Unificar las 5 poses (ya normalizadas) en un vector plano de 960
+      final combinedVector = poses
+          .map((p) => FaceRecognitionService.sanitize(p)!)
+          .expand((p) => p)
+          .toList();
+
+      assert(combinedVector.length == dim * 5);
 
       final success = await _sqlServer.actualizarVectorEmpleado(
         cedula: cedula,

@@ -3,6 +3,104 @@ import 'package:path/path.dart';
 import 'package:intl/intl.dart';
 import '../models/employee.dart';
 import '../models/face_embedding.dart';
+import 'face_recognition_service.dart';
+
+/// Resumen de la limpieza de la galería biométrica local.
+class EmbeddingPurgeReport {
+  final int totalRevisados;
+  final int eliminados;
+  final int renormalizados;
+  final Set<int> empleadosSinPlantillaFrontal;
+
+  const EmbeddingPurgeReport({
+    required this.totalRevisados,
+    required this.eliminados,
+    required this.renormalizados,
+    required this.empleadosSinPlantillaFrontal,
+  });
+
+  bool get sinCambios => eliminados == 0 && renormalizados == 0;
+}
+
+/// Clasificación biométrica de un colaborador.
+enum NivelEnrolamiento {
+  /// Listo: tiene plantilla frontal válida y las 5 poses.
+  ok,
+
+  /// Puede marcar por rostro, pero le faltan poses válidas para poder
+  /// sincronizar el enrolamiento con el servidor central.
+  incompleto,
+
+  /// Tiene plantillas válidas pero ninguna frontal: el reconocimiento solo
+  /// compara contra poses frontales, así que NO puede identificarse.
+  sinFrontal,
+
+  /// Tenía plantillas, pero todas resultaron inválidas y se descartaron.
+  /// Es el grupo que perdió su enrolamiento en la limpieza.
+  invalido,
+
+  /// Nunca se enroló.
+  nuncaEnrolado,
+}
+
+class EnrollmentStatus {
+  final Employee employee;
+  final int plantillasTotales;
+  final int plantillasValidas;
+  final int plantillasInvalidas;
+  final int frontalesValidas;
+  final Set<String> posesValidas;
+
+  const EnrollmentStatus({
+    required this.employee,
+    required this.plantillasTotales,
+    required this.plantillasValidas,
+    required this.plantillasInvalidas,
+    required this.frontalesValidas,
+    required this.posesValidas,
+  });
+
+  NivelEnrolamiento get nivel {
+    if (plantillasTotales == 0) return NivelEnrolamiento.nuncaEnrolado;
+    if (plantillasValidas == 0) return NivelEnrolamiento.invalido;
+    if (frontalesValidas == 0) return NivelEnrolamiento.sinFrontal;
+    if (plantillasValidas < 5) return NivelEnrolamiento.incompleto;
+    return NivelEnrolamiento.ok;
+  }
+
+  /// true si esta persona NO puede marcar por rostro ahora mismo.
+  bool get requiereReenrolamiento =>
+      nivel == NivelEnrolamiento.nuncaEnrolado ||
+      nivel == NivelEnrolamiento.invalido ||
+      nivel == NivelEnrolamiento.sinFrontal;
+
+  String get etiqueta => switch (nivel) {
+        NivelEnrolamiento.ok => 'Enrolado',
+        NivelEnrolamiento.incompleto => 'Incompleto',
+        NivelEnrolamiento.sinFrontal => 'Sin pose frontal',
+        NivelEnrolamiento.invalido => 'Plantillas inválidas',
+        NivelEnrolamiento.nuncaEnrolado => 'Sin enrolar',
+      };
+
+  String get explicacion => switch (nivel) {
+        NivelEnrolamiento.ok =>
+          'Puede marcar por rostro. $plantillasValidas poses válidas.',
+        NivelEnrolamiento.incompleto =>
+          'Puede marcar por rostro, pero solo tiene $plantillasValidas de 5 '
+              'poses válidas: el enrolamiento no se puede subir al servidor '
+              'central. Conviene repetir la captura.',
+        NivelEnrolamiento.sinFrontal =>
+          'Tiene $plantillasValidas plantilla(s) pero ninguna frontal. '
+              'El reconocimiento solo compara contra poses frontales, así que '
+              'NO puede identificarse. Debe re-enrolarse.',
+        NivelEnrolamiento.invalido =>
+          'Sus $plantillasTotales plantilla(s) eran inválidas (vector nulo, '
+              'sin normalizar o de otro modelo) y se descartaron. '
+              'Debe re-enrolarse.',
+        NivelEnrolamiento.nuncaEnrolado =>
+          'Nunca se le capturó el rostro en este dispositivo.',
+      };
+}
 
 class DatabaseService {
   static Database? _db;
@@ -16,7 +114,7 @@ class DatabaseService {
     final path = join(await getDatabasesPath(), 'attendance.db');
     return openDatabase(
       path,
-      version: 15,
+      version: 16,
       onCreate: _createDB,
       onUpgrade: _onUpgrade,
     );
@@ -60,6 +158,11 @@ class DatabaseService {
         is_synced INTEGER DEFAULT 0,
         metodo_registro TEXT DEFAULT 'FACIAL',
         dispositivo_id TEXT,
+        margen REAL,
+        rival_employee_id INTEGER,
+        evidencia_path TEXT,
+        autorizado_por TEXT,
+        bypass_motivo TEXT,
         FOREIGN KEY (employee_id) REFERENCES employees(id)
       )
     ''');
@@ -281,6 +384,62 @@ class DatabaseService {
         print('Error adding id_un_item column to employees table: $e');
       }
     }
+    if (oldVersion < 16) {
+      // Columnas de auditoría del reconocimiento. Sin ellas no es posible
+      // demostrar por qué el sistema aceptó una marcación ante una disputa.
+      const nuevas = {
+        'margen': 'REAL',
+        'rival_employee_id': 'INTEGER',
+        'evidencia_path': 'TEXT',
+        'autorizado_por': 'TEXT',
+        'bypass_motivo': 'TEXT',
+      };
+      for (final entry in nuevas.entries) {
+        try {
+          await db.execute(
+            'ALTER TABLE attendance_records ADD COLUMN ${entry.key} ${entry.value}',
+          );
+        } catch (e) {
+          print('Column ${entry.key} already exists or error: $e');
+        }
+      }
+
+      // Limpieza única de la galería heredada: elimina vectores de ceros,
+      // vectores de otra dimensión y re-normaliza los que no eran unitarios.
+      try {
+        final rows = await db.query(
+          'face_embeddings',
+          columns: ['id', 'embedding'],
+        );
+        int borrados = 0;
+        for (final row in rows) {
+          final id = row['id'] as int;
+          final raw = (row['embedding'] as String?) ?? '';
+          final clean = FaceRecognitionService.parseStored(raw);
+          if (clean == null) {
+            await db.delete(
+              'face_embeddings',
+              where: 'id = ?',
+              whereArgs: [id],
+            );
+            borrados++;
+          } else {
+            final joined = clean.join(',');
+            if (joined != raw) {
+              await db.update(
+                'face_embeddings',
+                {'embedding': joined},
+                where: 'id = ?',
+                whereArgs: [id],
+              );
+            }
+          }
+        }
+        print('[DB v16] Embeddings inválidos eliminados: $borrados');
+      } catch (e) {
+        print('[DB v16] Error al purgar embeddings heredados: $e');
+      }
+    }
   }
 
   // CONFIGURACIÓN DE SISTEMA
@@ -357,18 +516,170 @@ class DatabaseService {
   }
 
   // EMBEDDINGS
-  Future<int> saveEmbedding(int employeeId, List<double> embedding, String angleType) async {
+  /// Guarda un embedding SIEMPRE normalizado L2 y con la dimensión correcta.
+  ///
+  /// Devuelve -1 y no escribe nada si el vector es inutilizable (dimensión
+  /// distinta de 192, valores no finitos, o vector de ceros). Rechazar aquí es
+  /// la barrera que impide que un vector inválido contamine la galería y gane
+  /// todas las comparaciones.
+  Future<int> saveEmbedding(
+    int employeeId,
+    List<double> embedding,
+    String angleType,
+  ) async {
+    final clean = FaceRecognitionService.sanitize(embedding);
+    if (clean == null) {
+      print(
+        '[DB] Embedding RECHAZADO para employee_id=$employeeId '
+        'pose=$angleType (dim=${embedding.length}). No se guarda.',
+      );
+      return -1;
+    }
+
     final db = await database;
     return db.insert('face_embeddings', {
       'employee_id': employeeId,
-      'embedding': embedding.join(','),
+      'embedding': clean.join(','),
       'angle_type': angleType,
     });
   }
 
   Future<List<Map<String, dynamic>>> getAllEmbeddings() async {
     final db = await database;
-    return db.query('face_embeddings', columns: ['employee_id', 'embedding']);
+    return db.query(
+      'face_embeddings',
+      columns: ['employee_id', 'embedding', 'angle_type'],
+    );
+  }
+
+  /// Elimina de la galería local todo embedding que no pase la validación:
+  /// dimensión incorrecta, vectores de ceros (los placeholders que se subían
+  /// por poses faltantes) o valores no finitos. Además re-normaliza los que
+  /// sean válidos pero no unitarios.
+  ///
+  /// Devuelve un resumen para mostrar en la pantalla de calibración.
+  Future<EmbeddingPurgeReport> purgarEmbeddingsInvalidos() async {
+    final db = await database;
+    final rows = await db.query(
+      'face_embeddings',
+      columns: ['id', 'employee_id', 'embedding', 'angle_type'],
+    );
+
+    int eliminados = 0;
+    int renormalizados = 0;
+    final afectados = <int>{};
+
+    for (final row in rows) {
+      final id = row['id'] as int;
+      final employeeId = row['employee_id'] as int;
+      final raw = (row['embedding'] as String?) ?? '';
+
+      final clean = FaceRecognitionService.parseStored(raw);
+      if (clean == null) {
+        await db.delete('face_embeddings', where: 'id = ?', whereArgs: [id]);
+        eliminados++;
+        afectados.add(employeeId);
+        continue;
+      }
+
+      final joined = clean.join(',');
+      if (joined != raw) {
+        await db.update(
+          'face_embeddings',
+          {'embedding': joined},
+          where: 'id = ?',
+          whereArgs: [id],
+        );
+        renormalizados++;
+      }
+    }
+
+    // Empleados que quedaron sin ninguna plantilla frontal utilizable.
+    final restantes = await db.query(
+      'face_embeddings',
+      columns: ['employee_id', 'angle_type'],
+    );
+    final conFrontal = restantes
+        .where(
+          (r) => FaceRecognitionService.frontalPoses.contains(
+            (r['angle_type'] as String?) ?? '',
+          ),
+        )
+        .map((r) => r['employee_id'] as int)
+        .toSet();
+
+    final sinFrontal = afectados.difference(conFrontal);
+
+    return EmbeddingPurgeReport(
+      totalRevisados: rows.length,
+      eliminados: eliminados,
+      renormalizados: renormalizados,
+      empleadosSinPlantillaFrontal: sinFrontal,
+    );
+  }
+
+  /// Estado biométrico de CADA colaborador, validando plantilla por plantilla.
+  ///
+  /// Responde a la pregunta operativa "¿a quién tengo que re-enrolar?" con
+  /// nombres y cédulas, no con un conteo. La validación es la misma que usa el
+  /// reconocimiento, así que lo que aquí sale como OK es exactamente lo que el
+  /// tótem puede identificar.
+  Future<List<EnrollmentStatus>> obtenerEstadoEnrolamiento() async {
+    final db = await database;
+
+    final employees = await db.query('employees', orderBy: 'name COLLATE NOCASE');
+    final rows = await db.query(
+      'face_embeddings',
+      columns: ['employee_id', 'embedding', 'angle_type'],
+    );
+
+    final porEmpleado = <int, List<Map<String, dynamic>>>{};
+    for (final r in rows) {
+      final id = r['employee_id'] as int?;
+      if (id == null) continue;
+      porEmpleado.putIfAbsent(id, () => []).add(r);
+    }
+
+    final resultado = <EnrollmentStatus>[];
+
+    for (final e in employees) {
+      final emp = Employee.fromMap(e);
+      final propias = porEmpleado[emp.id] ?? const <Map<String, dynamic>>[];
+
+      int validas = 0;
+      int invalidas = 0;
+      int frontalesValidas = 0;
+      final posesValidas = <String>{};
+
+      for (final r in propias) {
+        final raw = (r['embedding'] as String?) ?? '';
+        final angle = (r['angle_type'] as String?) ?? 'Frontal';
+        final clean = FaceRecognitionService.parseStored(raw);
+
+        if (clean == null) {
+          invalidas++;
+          continue;
+        }
+        validas++;
+        posesValidas.add(angle);
+        if (FaceRecognitionService.frontalPoses.contains(angle)) {
+          frontalesValidas++;
+        }
+      }
+
+      resultado.add(
+        EnrollmentStatus(
+          employee: emp,
+          plantillasTotales: propias.length,
+          plantillasValidas: validas,
+          plantillasInvalidas: invalidas,
+          frontalesValidas: frontalesValidas,
+          posesValidas: posesValidas,
+        ),
+      );
+    }
+
+    return resultado;
   }
 
   Future<List<FaceEmbedding>> getEmbeddingsByEmployee(int employeeId) async {
@@ -392,9 +703,14 @@ class DatabaseService {
     int isSynced = 0,
     String metodoRegistro = 'FACIAL',
     String? dispositivoId,
+    double? margen,
+    int? rivalEmployeeId,
+    String? evidenciaPath,
+    String? autorizadoPor,
+    String? bypassMotivo,
   }) async {
     final db = await database;
-    
+
     // Protección contra duplicados accidentales: cooldown de 15 segundos
     final checkTime = timestamp.subtract(const Duration(seconds: 15)).toIso8601String();
     final recent = await db.query(
@@ -417,6 +733,11 @@ class DatabaseService {
       'is_synced': isSynced,
       'metodo_registro': metodoRegistro,
       'dispositivo_id': dispositivoId,
+      'margen': margen,
+      'rival_employee_id': rivalEmployeeId,
+      'evidencia_path': evidenciaPath,
+      'autorizado_por': autorizadoPor,
+      'bypass_motivo': bypassMotivo,
     });
   }
 

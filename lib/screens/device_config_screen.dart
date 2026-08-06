@@ -1,8 +1,19 @@
 import 'package:flutter/material.dart';
 import '../services/database_service.dart';
 import '../services/sql_server_service.dart';
+import '../services/supervisor_auth.dart';
 import '../services/version_helper.dart';
 import '../theme/app_colors.dart';
+import 'attendance_screen.dart'
+    show
+        kCfgUmbral,
+        kCfgMargen,
+        kCfgVotos,
+        kUmbralPorDefecto,
+        kMargenPorDefecto,
+        kVotosPorDefecto;
+import 'calibration_screen.dart';
+import 'enrollment_status_screen.dart';
 
 class DeviceConfigScreen extends StatefulWidget {
   const DeviceConfigScreen({super.key});
@@ -14,8 +25,10 @@ class DeviceConfigScreen extends StatefulWidget {
 class _DeviceConfigScreenState extends State<DeviceConfigScreen> {
   final _database = DatabaseService();
   final _sqlServer = SqlServerService();
+  final _supervisor = SupervisorAuth();
 
   bool _isAuthenticated = false;
+  bool _usaClaveDeFabrica = false;
   final _passwordController = TextEditingController();
   String? _errorMessage;
 
@@ -25,7 +38,9 @@ class _DeviceConfigScreenState extends State<DeviceConfigScreen> {
   String? _selectedDeviceId;
   String _selectedIp = SqlServerService.ipPublica;
 
-  double _threshold = 0.22;
+  double _threshold = kUmbralPorDefecto;
+  double _margin = kMargenPorDefecto;
+  int _votes = kVotosPorDefecto;
   int _minFaceSize = 130;
   double _centerTolerance = 0.15;
 
@@ -43,17 +58,22 @@ class _DeviceConfigScreenState extends State<DeviceConfigScreen> {
   Future<void> _loadCurrentDevice() async {
     final devId = await _database.getDeviceId();
     final customIp = await _database.getConfig('sql_server_ip');
-    final tStr = await _database.getConfig('recognition_threshold');
+    final tStr = await _database.getConfig(kCfgUmbral);
+    final mStr = await _database.getConfig(kCfgMargen);
+    final vStr = await _database.getConfig(kCfgVotos);
     final sStr = await _database.getConfig('min_face_size');
     final cStr = await _database.getConfig('center_tolerance');
 
+    if (!mounted) return;
     setState(() {
       _currentDeviceId = devId;
       _selectedDeviceId = devId;
       _selectedIp = customIp ?? SqlServerService.ipPublica;
-      if (tStr != null) _threshold = double.tryParse(tStr) ?? 0.22;
-      if (sStr != null) _minFaceSize = int.tryParse(sStr) ?? 130;
-      if (cStr != null) _centerTolerance = double.tryParse(cStr) ?? 0.15;
+      _threshold = double.tryParse(tStr ?? '') ?? kUmbralPorDefecto;
+      _margin = double.tryParse(mStr ?? '') ?? kMargenPorDefecto;
+      _votes = int.tryParse(vStr ?? '') ?? kVotosPorDefecto;
+      _minFaceSize = int.tryParse(sStr ?? '') ?? 130;
+      _centerTolerance = double.tryParse(cStr ?? '') ?? 0.15;
     });
   }
 
@@ -85,17 +105,108 @@ class _DeviceConfigScreenState extends State<DeviceConfigScreen> {
     await _fetchDevicesFromServer();
   }
 
-  void _verifyPassword() {
-    if (_passwordController.text.trim() == 'admin2026') {
+  /// Verifica contra el hash guardado en el dispositivo.
+  ///
+  /// Antes la clave estaba escrita en el código (`'admin2026'`): era idéntica
+  /// en todas las sedes y cualquiera podía leerla descompilando el APK.
+  Future<void> _verifyPassword() async {
+    final ok = await _supervisor.verificar(_passwordController.text.trim());
+    if (!mounted) return;
+
+    if (ok) {
+      final deFabrica = await _supervisor.usaClaveDeFabrica();
+      if (!mounted) return;
       setState(() {
         _isAuthenticated = true;
         _errorMessage = null;
+        _usaClaveDeFabrica = deFabrica;
       });
       _fetchDevicesFromServer();
     } else {
       setState(() {
         _errorMessage = 'Contraseña incorrecta';
       });
+    }
+  }
+
+  Future<void> _cambiarClave() async {
+    final actual = TextEditingController();
+    final nueva = TextEditingController();
+    final repetir = TextEditingController();
+    String? error;
+
+    final guardada = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
+          title: const Text('Cambiar clave de supervisor'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: actual,
+                obscureText: true,
+                decoration: const InputDecoration(labelText: 'Clave actual'),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: nueva,
+                obscureText: true,
+                decoration: const InputDecoration(labelText: 'Clave nueva'),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: repetir,
+                obscureText: true,
+                decoration: InputDecoration(
+                  labelText: 'Repetir clave nueva',
+                  errorText: error,
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancelar'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                if (!await _supervisor.verificar(actual.text.trim())) {
+                  setLocal(() => error = 'La clave actual no es correcta');
+                  return;
+                }
+                if (nueva.text.trim().length < 6) {
+                  setLocal(() => error = 'Usa al menos 6 caracteres');
+                  return;
+                }
+                if (nueva.text.trim() != repetir.text.trim()) {
+                  setLocal(() => error = 'Las claves nuevas no coinciden');
+                  return;
+                }
+                await _supervisor.cambiarClave(nueva.text.trim());
+                if (ctx.mounted) Navigator.of(ctx).pop(true);
+              },
+              child: const Text('Guardar'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    actual.dispose();
+    nueva.dispose();
+    repetir.dispose();
+
+    if (guardada == true && mounted) {
+      setState(() => _usaClaveDeFabrica = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Clave de supervisor actualizada.'),
+          backgroundColor: AppColors.success,
+        ),
+      );
     }
   }
 
@@ -290,10 +401,98 @@ class _DeviceConfigScreenState extends State<DeviceConfigScreen> {
     );
   }
 
+  Widget _paramRow(String etiqueta, String valor) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 3),
+    child: Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Expanded(
+          child: Text(
+            etiqueta,
+            style: const TextStyle(fontSize: 12, color: Colors.grey),
+          ),
+        ),
+        Text(
+          valor,
+          style: const TextStyle(
+            fontSize: 14,
+            fontWeight: FontWeight.bold,
+            color: AppColors.primary,
+          ),
+        ),
+      ],
+    ),
+  );
+
+  Widget _buildSeguridadCard(bool isDark) => Container(
+    padding: const EdgeInsets.all(16),
+    decoration: BoxDecoration(
+      color: isDark ? AppColors.kioskSurface : Colors.white,
+      borderRadius: BorderRadius.circular(12),
+      border: Border.all(
+        color: _usaClaveDeFabrica
+            ? AppColors.error.withOpacity(0.5)
+            : (isDark ? Colors.white10 : Colors.black12),
+      ),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Row(
+          children: [
+            Icon(Icons.shield_outlined, color: AppColors.primary, size: 24),
+            SizedBox(width: 12),
+            Text(
+              'Seguridad',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        const Text(
+          'La clave de supervisor autoriza la marcación por cédula y saltarse '
+          'validaciones de flujo. Se guarda cifrada en este dispositivo.',
+          style: TextStyle(fontSize: 12, color: Colors.grey),
+        ),
+        if (_usaClaveDeFabrica) ...[
+          const SizedBox(height: 12),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: AppColors.error.withOpacity(0.10),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: AppColors.error.withOpacity(0.35)),
+            ),
+            child: const Text(
+              'Este tótem sigue usando la clave de fábrica. Cámbiala: era la '
+              'misma en todas las sedes y estaba escrita en el código de la app.',
+              style: TextStyle(fontSize: 12, color: AppColors.error),
+            ),
+          ),
+        ],
+        const SizedBox(height: 14),
+        OutlinedButton.icon(
+          style: OutlinedButton.styleFrom(
+            minimumSize: const Size.fromHeight(46),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(8),
+            ),
+          ),
+          onPressed: _cambiarClave,
+          icon: const Icon(Icons.password_rounded),
+          label: const Text('Cambiar clave de supervisor'),
+        ),
+      ],
+    ),
+  );
+
   Widget _buildSelectionView(bool isDark) {
     return ListView(
       physics: const BouncingScrollPhysics(),
       children: [
+        _buildSeguridadCard(isDark),
+        const SizedBox(height: 16),
         // Estado actual
         Container(
           padding: const EdgeInsets.all(16),
@@ -439,34 +638,83 @@ class _DeviceConfigScreenState extends State<DeviceConfigScreen> {
               ),
               const SizedBox(height: 16),
               
-              // Umbral de Distancia Coseno
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  const Text('Sensibilidad (Umbral Distancia)', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-                  Text(
-                    _threshold.toStringAsFixed(2),
-                    style: const TextStyle(fontWeight: FontWeight.bold, color: AppColors.primary),
-                  ),
-                ],
+              // --- Parámetros de decisión biométrica --------------------
+              //
+              // Ya NO son sliders manuales. El umbral correcto depende de cuán
+              // parecidas son las personas realmente enroladas en esta sede;
+              // moverlo a ojo es lo que provocaba los falsos positivos.
+              // Ahora se derivan midiendo la galería real en el calibrador.
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: AppColors.primary.withOpacity(0.06),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: AppColors.primary.withOpacity(0.2)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Parámetros de decisión biométrica',
+                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                    ),
+                    const SizedBox(height: 10),
+                    _paramRow('Umbral de distancia', _threshold.toStringAsFixed(3)),
+                    _paramRow('Margen vs. 2º candidato', _margin.toStringAsFixed(3)),
+                    _paramRow('Frames coincidentes exigidos', '$_votes'),
+                    const SizedBox(height: 10),
+                    const Text(
+                      'Estos valores se obtienen midiendo la galería real, no '
+                      'ajustándolos a mano. Ejecuta el calibrador después de '
+                      'cada tanda de enrolamientos.',
+                      style: TextStyle(fontSize: 11, color: Colors.grey),
+                    ),
+                    const SizedBox(height: 12),
+                    ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.primary,
+                        foregroundColor: Colors.white,
+                        minimumSize: const Size.fromHeight(46),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                      ),
+                      onPressed: () async {
+                        await Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => const CalibrationScreen(),
+                          ),
+                        );
+                        _loadCurrentDevice();
+                      },
+                      icon: const Icon(Icons.tune_rounded),
+                      label: const Text(
+                        'Calibrar reconocimiento',
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    OutlinedButton.icon(
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: AppColors.primary,
+                        side: const BorderSide(color: AppColors.primary),
+                        minimumSize: const Size.fromHeight(46),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                      ),
+                      onPressed: () => Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => const EnrollmentStatusScreen(),
+                        ),
+                      ),
+                      icon: const Icon(Icons.fact_check_outlined),
+                      label: const Text('Estado de enrolamiento'),
+                    ),
+                  ],
+                ),
               ),
-              const Text(
-                'Menores valores reducen falsos positivos pero exigen una pose más exacta.',
-                style: TextStyle(fontSize: 11, color: Colors.grey),
-              ),
-              Slider(
-                value: _threshold.clamp(0.15, 0.45),
-                min: 0.15,
-                max: 0.45,
-                divisions: 30,
-                activeColor: AppColors.primary,
-                label: _threshold.toStringAsFixed(2),
-                onChanged: (val) {
-                  setState(() => _threshold = val);
-                  _database.saveConfig('recognition_threshold', val.toString());
-                },
-              ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 20),
 
               // Tamaño Mínimo de Rostro
               Row(

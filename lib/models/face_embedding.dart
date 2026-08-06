@@ -24,15 +24,28 @@ class FaceEmbedding {
   }
 
   factory FaceEmbedding.fromMap(Map<String, dynamic> map) {
+    // Tolerante a datos corruptos: un valor no parseable ya no revienta toda
+    // la consulta. El vector resultante queda vacío y `sanitize` lo rechaza
+    // más adelante, que es el comportamiento correcto.
+    final raw = (map['embedding'] as String?) ?? '';
+    final values = <double>[];
+    for (final part in raw.split(',')) {
+      final v = double.tryParse(part);
+      if (v == null) {
+        values.clear();
+        break;
+      }
+      values.add(v);
+    }
+
     return FaceEmbedding(
       id: map['id'] as int?,
       employeeId: map['employee_id'] as int,
-      embedding: (map['embedding'] as String)
-          .split(',')
-          .map((e) => double.parse(e))
-          .toList(),
-      angleType: map['angle_type'] as String,
-      createdAt: DateTime.parse(map['created_at'] as String),
+      embedding: values,
+      angleType: (map['angle_type'] as String?) ?? 'Frontal',
+      createdAt:
+          DateTime.tryParse((map['created_at'] as String?) ?? '') ??
+              DateTime.now(),
     );
   }
 }

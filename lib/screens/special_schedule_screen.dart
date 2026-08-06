@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../services/database_service.dart';
+import '../services/supervisor_auth.dart';
 import '../services/sync_service.dart';
 import '../models/employee.dart';
 import '../theme/app_colors.dart';
@@ -15,6 +16,7 @@ class SpecialScheduleScreen extends StatefulWidget {
 class _SpecialScheduleScreenState extends State<SpecialScheduleScreen> {
   final _database = DatabaseService();
   final _syncService = SyncService();
+  final _supervisor = SupervisorAuth();
 
   bool _isAuthenticated = false;
   final _passwordController = TextEditingController();
@@ -28,8 +30,13 @@ class _SpecialScheduleScreenState extends State<SpecialScheduleScreen> {
     super.initState();
   }
 
-  void _verifyPassword() {
-    if (_passwordController.text.trim() == 'admin2026') {
+  /// Verifica contra el hash guardado en el dispositivo, no contra una
+  /// constante en el código fuente.
+  Future<void> _verifyPassword() async {
+    final ok = await _supervisor.verificar(_passwordController.text.trim());
+    if (!mounted) return;
+
+    if (ok) {
       setState(() {
         _isAuthenticated = true;
         _errorMessage = null;
