@@ -843,6 +843,24 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     setState(() {
       _isProcessing = false;
     });
+
+    // Si quedó en estado de fallo (rechazo, cancelación, error, etc.), el
+    // aro/ícono rojo se limpia solo tras un momento. Sin esto, cualquier
+    // camino que llegue aquí con _scanState == failure deja el ícono de
+    // error pegado en pantalla indefinidamente.
+    if (_scanState == ScanState.failure) {
+      Future.delayed(const Duration(seconds: 2), () {
+        if (mounted && _scanState == ScanState.failure) {
+          setState(() {
+            _scanState = ScanState.idle;
+            _status = _isAutoMode
+                ? "Mira a la cámara para marcar"
+                : "Presiona Marcar para escanear";
+            _topMatches = [];
+          });
+        }
+      });
+    }
   }
 
   Future<({Map<String, dynamic>? horario, bool isNotProgrammed})>
