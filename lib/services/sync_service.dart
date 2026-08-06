@@ -428,6 +428,13 @@ class SyncService {
       ordenarPosesParaServidor(embeddings);
 
   /// Sube un colaborador recién enrolado localmente hacia SQL Server central
+  ///
+  /// DESHABILITADO en esta rama piloto: los embeddings aquí se generan con
+  /// alineación por landmarks, incompatible con los que ya tienen todas las
+  /// tablets de producción en el servidor central. Subir uno pisaría el
+  /// vector compartido de ese empleado y rompería su reconocimiento en el
+  /// resto de las tablets (que siguen con el recorte rectangular). El resto
+  /// de la sincronización (horarios, empleados, asistencias) sigue intacta.
   Future<bool> subirEnrolamiento({
     required String cedula,
     required String nombre,
@@ -435,52 +442,12 @@ class SyncService {
     String? departamento,
     String? horarioId,
   }) async {
-    try {
-      const int dim = FaceRecognitionService.embeddingSize;
-
-      // Barrera final: nunca subir un enrolamiento incompleto o corrupto.
-      if (poses.length != posesEsperadas.length) {
-        print(
-          '[Sync] subirEnrolamiento abortado para $cedula: se esperaban '
-          '${posesEsperadas.length} poses y llegaron ${poses.length}.',
-        );
-        return false;
-      }
-      for (int i = 0; i < poses.length; i++) {
-        if (FaceRecognitionService.sanitize(poses[i]) == null) {
-          print(
-            '[Sync] subirEnrolamiento abortado para $cedula: la pose '
-            '"${posesEsperadas[i]}" es inválida (dim=${poses[i].length} '
-            'o vector nulo).',
-          );
-          return false;
-        }
-      }
-
-      // Unificar las 5 poses (ya normalizadas) en un vector plano de 960
-      final combinedVector = poses
-          .map((p) => FaceRecognitionService.sanitize(p)!)
-          .expand((p) => p)
-          .toList();
-
-      assert(combinedVector.length == dim * 5);
-
-      final success = await _sqlServer.actualizarVectorEmpleado(
-        cedula: cedula,
-        nombre: nombre,
-        vector: combinedVector,
-        idSeccion: departamento,
-        horarioId: horarioId,
-      );
-
-      if (success) {
-        print('[Sync] Enrolamiento subido con éxito a SQL Server para: $nombre ($cedula)');
-      }
-      return success;
-    } catch (e) {
-      print('[Sync] Error al subir enrolamiento: $e');
-      return false;
-    }
+    print(
+      '[Sync] subirEnrolamiento OMITIDO para $cedula ($nombre): deshabilitado '
+      'en la rama piloto para no contaminar el servidor central con '
+      'embeddings de landmarks.',
+    );
+    return false;
   }
 
   /// Sincroniza todas las marcaciones pendientes (is_synced = 0) de SQLite con SQL Server
