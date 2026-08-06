@@ -858,6 +858,13 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                 : "Presiona Marcar para escanear";
             _topMatches = [];
           });
+          // _startAutoTimer() de más arriba se bloqueó porque en ese momento
+          // _scanState todavía era failure. Ahora que ya volvió a idle, hay
+          // que rearmar el temporizador o el modo automático se queda
+          // pausado para siempre después de este tipo de fallo.
+          if (_isAutoMode) {
+            _startAutoTimer();
+          }
         }
       });
     }
