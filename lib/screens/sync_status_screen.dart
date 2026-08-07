@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import '../models/employee.dart';
 import '../services/database_service.dart';
 import '../services/sync_service.dart';
 import '../theme/app_colors.dart';
@@ -24,6 +25,11 @@ class _SyncStatusScreenState extends State<SyncStatusScreen> {
   int _pendingCount = 0;
   int _syncedCount = 0;
 
+  // Enrolamientos faciales (tabla employees, is_synced) — distinto de las
+  // marcaciones de arriba. Un empleado queda aquí mientras su vector no haya
+  // llegado al servidor central.
+  List<Employee> _enrolamientosPendientes = [];
+
   // Filter: null = Todos, 0 = Pendientes, 1 = Sincronizados
   int? _selectedFilter = 0; // Default to pending view
 
@@ -40,6 +46,7 @@ class _SyncStatusScreenState extends State<SyncStatusScreen> {
       final records = await _database.getAttendanceWithSyncStatus(
         syncedFilter: _selectedFilter,
       );
+      final empleados = await _database.getAllEmployees();
 
       if (mounted) {
         setState(() {
@@ -47,6 +54,8 @@ class _SyncStatusScreenState extends State<SyncStatusScreen> {
           _pendingCount = counts['pending'] ?? 0;
           _syncedCount = counts['synced'] ?? 0;
           _records = records;
+          _enrolamientosPendientes =
+              empleados.where((e) => e.isSynced == 0).toList();
         });
       }
     } catch (e) {
@@ -283,6 +292,55 @@ class _SyncStatusScreenState extends State<SyncStatusScreen> {
                   ),
                 ),
               ),
+
+              const SizedBox(height: 16),
+
+              // Enrolamientos faciales pendientes de subir (distinto de las
+              // marcaciones): un empleado enrolado localmente cuyo vector
+              // todavía no llegó al servidor central.
+              if (_enrolamientosPendientes.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                  child: Card(
+                    elevation: 2,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    color: isDark ? AppColors.kioskSurface : Colors.white,
+                    child: ExpansionTile(
+                      leading: const Icon(
+                        Icons.face_retouching_natural_outlined,
+                        color: AppColors.warning,
+                      ),
+                      title: Text(
+                        'Enrolamientos faciales pendientes de subir '
+                        '(${_enrolamientosPendientes.length})',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 13,
+                          color: isDark ? Colors.white : AppColors.textPrimary,
+                        ),
+                      ),
+                      subtitle: Text(
+                        'Su vector facial todavía no llegó al servidor central',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: isDark ? Colors.white60 : AppColors.textSecondary,
+                        ),
+                      ),
+                      children: _enrolamientosPendientes
+                          .map(
+                            (e) => ListTile(
+                              dense: true,
+                              leading: const Icon(Icons.person_outline),
+                              title: Text(e.name),
+                              subtitle: Text('Cédula: ${e.employeeCode}'),
+                            ),
+                          )
+                          .toList(),
+                    ),
+                  ),
+                ),
 
               const SizedBox(height: 16),
 
