@@ -68,10 +68,15 @@ class _SyncStatusScreenState extends State<SyncStatusScreen> {
   }
 
   Future<void> _sincronizarPendientes() async {
-    if (_pendingCount == 0) {
+    // _pendingCount solo cuenta marcaciones (attendance_records). Si hay
+    // enrolamientos faciales pendientes (tabla employees), hay que seguir
+    // igual: sincronizarAsistenciasPendientes() es la única vía que también
+    // sube los enrolamientos, y cortar aquí antes de llamarla los dejaba
+    // atascados aunque las marcaciones ya estuvieran al día.
+    if (_pendingCount == 0 && _enrolamientosPendientes.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('No hay marcaciones pendientes por sincronizar.'),
+          content: Text('No hay marcaciones ni enrolamientos pendientes por sincronizar.'),
           backgroundColor: AppColors.info,
         ),
       );
@@ -258,7 +263,10 @@ class _SyncStatusScreenState extends State<SyncStatusScreen> {
                   width: double.infinity,
                   height: 48,
                   child: ElevatedButton.icon(
-                    onPressed: (_isSyncing || _pendingCount == 0) ? null : _sincronizarPendientes,
+                    onPressed: (_isSyncing ||
+                            (_pendingCount == 0 && _enrolamientosPendientes.isEmpty))
+                        ? null
+                        : _sincronizarPendientes,
                     style: ElevatedButton.styleFrom(
                       backgroundColor: AppColors.primaryDark,
                       foregroundColor: Colors.white,
@@ -280,9 +288,9 @@ class _SyncStatusScreenState extends State<SyncStatusScreen> {
                         : const Icon(Icons.sync_rounded),
                     label: Text(
                       _isSyncing
-                          ? 'Sincronizando marcaciones...'
-                          : (_pendingCount > 0
-                              ? 'Sincronizar Pendientes ($_pendingCount)'
+                          ? 'Sincronizando...'
+                          : (_pendingCount > 0 || _enrolamientosPendientes.isNotEmpty
+                              ? 'Sincronizar Pendientes ($_pendingCount marc. + ${_enrolamientosPendientes.length} enrol.)'
                               : 'Todo Sincronizado'),
                       style: const TextStyle(
                         fontSize: 16,
