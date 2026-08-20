@@ -6,10 +6,10 @@ class SqlServerService {
   final String connectionId = 'mainDB';
   static const String ipPublica = '190.85.54.78';
   static const String ipLocal = '192.168.10.108';
-  final int port = 9788;
-  final String dbname = 'ARTDECOM';
+  final int port = 1433;
+  final String dbname = 'ARTDECON';
   final String username = 'sa';
-  final String password = 'sql2025DEVadmin';
+  final String password = 'ADMadm1234';
 
   bool _isConnected = false;
 
