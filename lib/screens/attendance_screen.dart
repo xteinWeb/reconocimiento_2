@@ -30,7 +30,7 @@ const String kCfgVotos = 'recognition_votes';
 /// personas de la plantilla. Usa el calibrador para fijarlos con datos reales.
 const double kUmbralPorDefecto = 0.20;
 const double kMargenPorDefecto = 0.06;
-const int kVotosPorDefecto = 3;
+const int kVotosPorDefecto = 1;
 
 class AttendanceScreen extends StatefulWidget {
   const AttendanceScreen({super.key});

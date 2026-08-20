@@ -314,7 +314,8 @@ class _CalibrationScreenState extends State<CalibrationScreen> {
     ],
   );
 
-  Widget _tarjetaActual(bool isDark) => _card(
+ 
+ Widget _tarjetaActual(bool isDark) => _card(
     isDark,
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -334,7 +335,7 @@ class _CalibrationScreenState extends State<CalibrationScreen> {
       ],
     ),
   );
-
+  
   Widget _tarjetaAnalisis(bool isDark) => _card(
     isDark,
     child: Column(
