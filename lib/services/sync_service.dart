@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:async';
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:intl/intl.dart';
 import 'database_service.dart';
 import 'face_recognition_service.dart';
 import 'sql_server_service.dart';
@@ -208,6 +209,40 @@ class SyncService {
           print('[Sync] Error al parsear vector para $nombre ($cedula): $e');
         }
       }
+    }
+
+    // Depuración de inactivos: obtenerYActualizarEmpleados() solo devuelve
+    // empleados ACTIVOS, así que el chequeo `estado == 'INACTIVO'` de arriba
+    // nunca se cumple. Cualquier empleado local que ya no venga en ese
+    // listado (porque pasó a INACTIVO en el ERP) se elimina aquí.
+    final cedulasActivas = remoteData
+        .map((r) => r['cedula']?.toString().trim())
+        .whereType<String>()
+        .where((c) => c.isNotEmpty)
+        .toSet();
+
+    final localEmployees = await _database.getAllEmployees();
+    for (final localEmp in localEmployees) {
+      final code = localEmp.employeeCode.trim();
+      if (code.isNotEmpty && localEmp.id != null && !cedulasActivas.contains(code)) {
+        final db = await _database.database;
+        await db.delete('face_embeddings', where: 'employee_id = ?', whereArgs: [localEmp.id]);
+        await db.delete('employees', where: 'id = ?', whereArgs: [localEmp.id]);
+        print('[Sync] Empleado ya no activo en el servidor, eliminado localmente: ${localEmp.name} ($code)');
+      }
+    }
+
+    // Bajar las novedades (incapacidades, permisos, etc.) vigentes para HOY,
+    // con su rango exacto de fecha/hora. Es lo que permite que al marcar
+    // asistencia se detecte localmente si la persona tiene un permiso activo
+    // en ese momento, sin depender de una consulta en línea al marcar.
+    try {
+      final hoyStr = DateFormat('yyyy-MM-dd').format(DateTime.now());
+      final novedades = await _sqlServer.obtenerNovedadesEmpleadoServidor(hoyStr);
+      await _database.reemplazarNovedadesEmpleado(novedades);
+      print('[Sync] Novedades de empleado vigentes hoy: ${novedades.length}.');
+    } catch (e) {
+      print('[Sync] Advertencia al sincronizar novedades de empleado: $e');
     }
 
     // Sincronizar ausencias locales hacia el servidor
@@ -540,6 +575,33 @@ class SyncService {
       'success': successCount,
       'failed': failCount,
     };
+  }
+
+  /// Sube de inmediato la novedad de llegada tarde (LLT) a `ausentismos` en el
+  /// servidor central, sin esperar al ciclo de sincronización/autogeneración.
+  ///
+  /// Es un intento "mejor esfuerzo": si no hay conexión ahora, no falla nada —
+  /// `autogenerarLltEnServidor()` la va a generar igual en la próxima
+  /// sincronización, porque su `NOT EXISTS` evita duplicados.
+  Future<void> registrarLltInmediato({
+    required String cedula,
+    required DateTime fechaHora,
+    required String duracion,
+    String? idDispositivo,
+  }) async {
+    try {
+      final fechaStr = DateFormat('yyyy-MM-dd').format(fechaHora);
+      final success = await _sqlServer.guardarAusentismoServidor(
+        cedula: cedula,
+        fecha: fechaStr,
+        sigla: 'LLT',
+        observacion: 'Retardo: $duracion',
+        idDispositivo: idDispositivo,
+      );
+      print('[Sync] Registro inmediato de LLT para $cedula: $success');
+    } catch (e) {
+      print('[Sync] No se pudo registrar el LLT inmediato para $cedula (se generará en la próxima sincronización): $e');
+    }
   }
 
   /// Sincroniza un registro de marcación individual por su ID
