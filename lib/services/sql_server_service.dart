@@ -1109,6 +1109,48 @@ class SqlServerService {
     }
   }
 
+  /// Obtiene las novedades de empleado (incapacidades, permisos, etc.) cuyo
+  /// rango [fecha_inicio, fecha_final] se cruza con el día `fecha`
+  /// (formato 'yyyy-MM-dd'). A diferencia de `ausentismos`, estas sí traen
+  /// hora exacta, necesaria para validar permisos de rango parcial del día.
+  Future<List<Map<String, dynamic>>> obtenerNovedadesEmpleadoServidor(String fecha) async {
+    final connected = await connect();
+    if (!connected) return [];
+
+    try {
+      final results = await SqlConn.read(connectionId, """
+        SELECT
+          LTRIM(RTRIM(cedula)) AS cedula,
+          tipo_novedad,
+          CONVERT(VARCHAR(19), fecha_inicio, 126) AS fecha_inicio,
+          CONVERT(VARCHAR(19), fecha_final, 126) AS fecha_final,
+          observacion,
+          estado
+        FROM novedades_empleado
+        WHERE fecha_inicio <= '$fecha 23:59:59' AND fecha_final >= '$fecha 00:00:00'
+      """);
+
+      final List<Map<String, dynamic>> output = [];
+      for (final rawRow in results) {
+        final row = Map<String, dynamic>.from(rawRow);
+        output.add({
+          'cedula': row['cedula']?.toString().trim(),
+          'tipo_novedad': row['tipo_novedad']?.toString().trim(),
+          'fecha_inicio': row['fecha_inicio']?.toString().trim(),
+          'fecha_final': row['fecha_final']?.toString().trim(),
+          'observacion': row['observacion']?.toString().trim(),
+          'estado': row['estado']?.toString().trim(),
+        });
+      }
+      return output;
+    } catch (e) {
+      print('[SqlServer] Error al obtener novedades de empleado del servidor: $e');
+      return [];
+    } finally {
+      await disconnect();
+    }
+  }
+
   /// Catálogo oficial de plantas de la empresa
   static const Map<String, String> CATALOGO_PLANTAS = {
     'PL01': 'PL01 - PLANTA DE COMPONENTES',

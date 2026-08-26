@@ -539,6 +539,19 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             }
           }
 
+          // 4.5 Si a esta hora exacta el empleado tiene una novedad vigente
+          // (incapacidad, permiso con rango de horas, etc.), no la pisamos
+          // con NORMAL/RETARDO/etc.: se guarda igual, pero con un tipo
+          // distinto para identificar después que esa marcación cayó dentro
+          // de un permiso/incapacidad ya autorizado.
+          final novedadVigente = await _database.getNovedadEmpleadoVigente(matchedId, now);
+          if (novedadVigente != null) {
+            final tipoNovedad = novedadVigente['tipo_novedad']?.toString();
+            tipoFinal = 'CON_NOVEDAD';
+            final etiqueta = (tipoNovedad != null && tipoNovedad.isNotEmpty) ? tipoNovedad : 'novedad';
+            feedbackMsg = 'Marcación registrada. Tienes "$etiqueta" vigente en este horario.';
+          }
+
           // 5. Guardar localmente en SQLite con rastro auditable completo:
           //    distancia, margen contra el segundo candidato, quién era ese
           //    candidato, la foto del rostro que produjo la decisión y, si
@@ -572,6 +585,15 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           _syncService.sincronizarAsistenciasPendientes().then((result) {
             print('[Sync] Sincronización automática de marcaciones: $result');
           });
+
+          if (tipoFinal == 'RETARDO' && duracionRetardo != null) {
+            _syncService.registrarLltInmediato(
+              cedula: employee.employeeCode,
+              fechaHora: now,
+              duracion: duracionRetardo,
+              idDispositivo: deviceId,
+            );
+          }
 
           setState(() {
             _scanState = ScanState.success;
@@ -931,6 +953,14 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         }
       }
 
+      final novedadVigente = await _database.getNovedadEmpleadoVigente(employee.id!, now);
+      if (novedadVigente != null) {
+        final tipoNovedad = novedadVigente['tipo_novedad']?.toString();
+        tipoFinal = 'CON_NOVEDAD';
+        final etiqueta = (tipoNovedad != null && tipoNovedad.isNotEmpty) ? tipoNovedad : 'novedad';
+        feedbackMsg = 'Marcación registrada. Tienes "$etiqueta" vigente en este horario.';
+      }
+
       final deviceId = await _database.getDeviceId();
       final recordId = await _database.insertAttendance(
         employee.id!,
@@ -952,6 +982,15 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         _recognizedEmployee = employee;
         _isProcessing = false;
       });
+
+      if (tipoFinal == 'RETARDO' && duracionRetardo != null) {
+        _syncService.registrarLltInmediato(
+          cedula: employee.employeeCode,
+          fechaHora: now,
+          duracion: duracionRetardo,
+          idDispositivo: deviceId,
+        );
+      }
 
       _syncService.sincronizarAsistenciasPendientes().then((result) {
         print(

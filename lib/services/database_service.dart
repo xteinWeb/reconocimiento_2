@@ -114,7 +114,7 @@ class DatabaseService {
     final path = join(await getDatabasesPath(), 'attendance.db');
     return openDatabase(
       path,
-      version: 16,
+      version: 17,
       onCreate: _createDB,
       onUpgrade: _onUpgrade,
     );
@@ -218,6 +218,19 @@ class DatabaseService {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (employee_id) REFERENCES employees(id),
         UNIQUE(employee_id, date) ON CONFLICT REPLACE
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE novedades_empleado (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        employee_id INTEGER NOT NULL,
+        tipo_novedad TEXT,
+        fecha_inicio TEXT NOT NULL,
+        fecha_final TEXT NOT NULL,
+        observacion TEXT,
+        estado TEXT,
+        FOREIGN KEY (employee_id) REFERENCES employees(id)
       )
     ''');
   }
@@ -438,6 +451,24 @@ class DatabaseService {
         print('[DB v16] Embeddings inválidos eliminados: $borrados');
       } catch (e) {
         print('[DB v16] Error al purgar embeddings heredados: $e');
+      }
+    }
+    if (oldVersion < 17) {
+      try {
+        await db.execute('''
+          CREATE TABLE IF NOT EXISTS novedades_empleado (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            employee_id INTEGER NOT NULL,
+            tipo_novedad TEXT,
+            fecha_inicio TEXT NOT NULL,
+            fecha_final TEXT NOT NULL,
+            observacion TEXT,
+            estado TEXT,
+            FOREIGN KEY (employee_id) REFERENCES employees(id)
+          )
+        ''');
+      } catch (e) {
+        print('Error creating novedades_empleado table: $e');
       }
     }
   }
@@ -1134,5 +1165,63 @@ class DatabaseService {
       },
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+  }
+
+  // NOVEDADES DE EMPLEADO (incapacidades, permisos, etc. con rango de hora exacto)
+
+  /// Reemplaza el caché local completo de novedades vigentes. Se llama en
+  /// cada sincronización con lo que el servidor reporta para el día actual;
+  /// por eso se limpia todo antes de recargar, en vez de hacer upsert fila
+  /// por fila.
+  Future<void> reemplazarNovedadesEmpleado(List<Map<String, dynamic>> novedades) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      await txn.delete('novedades_empleado');
+      for (final n in novedades) {
+        final cedula = n['cedula']?.toString().trim();
+        final fechaInicio = n['fecha_inicio']?.toString();
+        final fechaFinal = n['fecha_final']?.toString();
+        if (cedula == null || cedula.isEmpty || fechaInicio == null || fechaFinal == null) {
+          continue;
+        }
+        final empList = await txn.query('employees', where: 'employee_code = ?', whereArgs: [cedula]);
+        if (empList.isEmpty) continue;
+        final employeeId = empList.first['id'] as int;
+
+        await txn.insert('novedades_empleado', {
+          'employee_id': employeeId,
+          'tipo_novedad': n['tipo_novedad']?.toString(),
+          'fecha_inicio': fechaInicio,
+          'fecha_final': fechaFinal,
+          'observacion': n['observacion']?.toString(),
+          'estado': n['estado']?.toString(),
+        });
+      }
+    });
+  }
+
+  /// Devuelve la novedad vigente para ese empleado en el instante exacto
+  /// `momento`, o null si no tiene ninguna en ese rango.
+  ///
+  /// La comparación se hace en Dart con DateTime, no con `WHERE` de SQLite:
+  /// fecha_inicio/fecha_final pueden llegar del servidor con o sin
+  /// fracciones de segundo, y comparar esos strings directamente arriesga
+  /// descartar por error el último instante de un rango.
+  Future<Map<String, dynamic>?> getNovedadEmpleadoVigente(int employeeId, DateTime momento) async {
+    final db = await database;
+    final candidatas = await db.query(
+      'novedades_empleado',
+      where: 'employee_id = ?',
+      whereArgs: [employeeId],
+    );
+    for (final n in candidatas) {
+      final inicio = DateTime.tryParse(n['fecha_inicio']?.toString() ?? '');
+      final fin = DateTime.tryParse(n['fecha_final']?.toString() ?? '');
+      if (inicio == null || fin == null) continue;
+      if (!momento.isBefore(inicio) && !momento.isAfter(fin)) {
+        return n;
+      }
+    }
+    return null;
   }
 }
