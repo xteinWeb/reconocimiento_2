@@ -518,8 +518,28 @@ class SyncService {
     }
   }
 
-  /// Sincroniza todas las marcaciones pendientes (is_synced = 0) de SQLite con SQL Server
-  Future<Map<String, int>> sincronizarAsistenciasPendientes() async {
+  static Future<Map<String, int>>? _sincronizacionAsistenciasEnCurso;
+
+  /// Sincroniza todas las marcaciones pendientes (is_synced = 0) de SQLite con SQL Server.
+  ///
+  /// Esta función se dispara desde varios lugares (al marcar, por reconexión
+  /// de red, por el botón manual, por el timer diario) y pueden solaparse en
+  /// el tiempo. Sin este candado, dos llamadas concurrentes leen el mismo
+  /// registro "pendiente" antes de que la primera alcance a marcarlo como
+  /// sincronizado, y cada una lo sube como fila distinta al servidor.
+  Future<Map<String, int>> sincronizarAsistenciasPendientes() {
+    final enCurso = _sincronizacionAsistenciasEnCurso;
+    if (enCurso != null) {
+      print('[Sync] Ya hay una sincronización de asistencias en curso, se espera esa misma.');
+      return enCurso;
+    }
+    final future = _sincronizarAsistenciasPendientesInterno();
+    _sincronizacionAsistenciasEnCurso = future;
+    future.whenComplete(() => _sincronizacionAsistenciasEnCurso = null);
+    return future;
+  }
+
+  Future<Map<String, int>> _sincronizarAsistenciasPendientesInterno() async {
     // Sincronizar primero enrolamientos locales pendientes
     await sincronizarEnrolamientosPendientes();
 

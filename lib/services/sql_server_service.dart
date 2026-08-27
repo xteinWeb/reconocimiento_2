@@ -380,32 +380,44 @@ class SqlServerService {
       final safeMetodoRegistro = metodoRegistro.replaceAll("'", "''");
       final safeIdDispositivo = idDispositivo != null ? "'${idDispositivo.replaceAll("'", "''")}'" : "NULL";
 
+      // IF NOT EXISTS evita duplicados cuando la misma marcación se reintenta
+      // (reconexión inestable disparando varias sincronizaciones seguidas):
+      // sin esto, cada reintento insertaba una fila nueva con un GUID distinto
+      // para la misma persona/fecha_hora/evento.
       final query =
           """
-        INSERT INTO registros_asistencia (
-          id,
-          fecha_hora, 
-          cedula, 
-          evento, 
-          duracion, 
-          tipo, 
-          unidad_negocio, 
-          fecha_registro_servidor, 
-          metodo_registro,
-          id_dispositivo
+        IF NOT EXISTS (
+            SELECT 1 FROM registros_asistencia
+            WHERE LTRIM(RTRIM(cedula)) = LTRIM(RTRIM('$safeCedula'))
+              AND fecha_hora = '$fechaHoraStr'
+              AND evento = '$safeEvento'
         )
-        VALUES (
-          CAST(NEWID() AS VARCHAR(36)),
-          '$fechaHoraStr', 
-          '$safeCedula', 
-          '$safeEvento', 
-          $duracion, 
-          '$safeTipo', 
-          '$safeUnidadNegocio', 
-          GETDATE(), 
-          '$safeMetodoRegistro',
-          $safeIdDispositivo
-        );
+        BEGIN
+            INSERT INTO registros_asistencia (
+              id,
+              fecha_hora,
+              cedula,
+              evento,
+              duracion,
+              tipo,
+              unidad_negocio,
+              fecha_registro_servidor,
+              metodo_registro,
+              id_dispositivo
+            )
+            VALUES (
+              CAST(NEWID() AS VARCHAR(36)),
+              '$fechaHoraStr',
+              '$safeCedula',
+              '$safeEvento',
+              $duracion,
+              '$safeTipo',
+              '$safeUnidadNegocio',
+              GETDATE(),
+              '$safeMetodoRegistro',
+              $safeIdDispositivo
+            );
+        END
       """;
 
       await SqlConn.write(connectionId, query);
